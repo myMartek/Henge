@@ -13,6 +13,8 @@ struct VirtualMac: Identifiable, Codable, Hashable {
     var added = Date()
     var osName: String?
     var lastUsed: Date?
+    /// "windows" for a Windows PC (visionOS: Vision/Windows.swift); a Mac has none.
+    var kind: String?
     /// The size macOS is told its screen is. Macs made before this was a choice have none: 16:9.
     var screenWidth: Int?
     var screenHeight: Int?
@@ -24,7 +26,9 @@ struct VirtualMac: Identifiable, Codable, Hashable {
 
     var directory: URL { Machines.directory(for: id) }
     var rom: URL { directory.appendingPathComponent("AVPBooter.vmapple2.bin") }
-    var disk: URL { directory.appendingPathComponent("disk.img") }
+    /// A Windows PC's disk has another name: the list of machines keeps only those whose disk is there, and what it
+    /// does not keep is cleared away as left over from an install cut short.
+    var disk: URL { directory.appendingPathComponent(kind == "windows" ? "windows.img" : "disk.img") }
     var aux: URL { directory.appendingPathComponent("auxiliary.bin") }
 }
 
@@ -39,6 +43,10 @@ enum GuestMemory {
         let free = (try? mac.directory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
             .volumeAvailableCapacityForImportantUsage ?? 0
         let room = free > 0 ? UInt64(max(free - (2 << 30), 0)) >> 20 : UInt64.max
+        #if os(visionOS)
+        // The address space held for Mac apps is most of what an app has there: a Mac's RAM needs it.
+        henge_ios_jit_release_high_room()
+        #endif
         let reach = henge_largest_mapping_mb()
         let ram = min(UInt64(mac.ramMB), room, reach > 512 ? reach - 512 : 0) / 512 * 512
         HengeLog.log("session", "guest RAM \(ram) MB (asked \(mac.ramMB), disk room \(room), largest mapping \(reach))")

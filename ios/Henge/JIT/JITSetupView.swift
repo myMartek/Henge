@@ -15,6 +15,8 @@ struct JITSetupFlow: View {
     @ObservedObject private var pairing = OnDevicePairing.shared
     @State private var path: [Step] = []
     @State private var importing = false
+    /// visionOS: the code the headset shows, as it is typed into Henge.
+    @State private var typedCode = ""
     @Environment(\.dismiss) private var dismiss
 
     private var device: String { OnDevicePairing.deviceKind }
@@ -149,6 +151,14 @@ struct JITSetupFlow: View {
              subtitle: "Henge pretends to be a computer on your Wi-Fi, and your \(device) pairs with it "
                      + "the way it would with a Mac.") {
             VStack(alignment: .leading, spacing: 14) {
+                #if os(visionOS)
+                // The other way round from iOS: the headset offers to pair and shows the code, Henge asks and sends it.
+                point(1, "Open **Settings › General › Remote Devices** and leave that window open.",
+                      done: pairing.isShowingPin || pairedOnDevice)
+                point(2, "Tap **Start pairing** below. Allow Local Network access and the VPN configuration if asked.",
+                      done: pairing.phase != .idle)
+                point(3, "Remote Devices shows a code. Type it here.", done: pairedOnDevice)
+                #else
                 point(1, "Turn on Wi-Fi, tap **Start pairing** below and allow Local Network access.",
                       done: pairing.phase != .idle)
                 point(2, "Open **Settings › Privacy & Security › Developer Mode**, scroll down and tap "
@@ -158,6 +168,7 @@ struct JITSetupFlow: View {
                        + "so you don't have to switch back.",
                       done: pairedOnDevice)
                 point(4, "Come back to Henge.", done: pairedOnDevice)
+                #endif
             }
             .padding(16).hengeCard()
             pairingStatus
@@ -179,6 +190,14 @@ struct JITSetupFlow: View {
         }
     }
 
+    private static func waitingText(_ device: String) -> String {
+        #if os(visionOS)
+        "Talking to this \(device)…"
+        #else
+        "Waiting for your \(device)…"
+        #endif
+    }
+
     @ViewBuilder private var pairingStatus: some View {
         switch pairing.phase {
         case .idle:
@@ -187,7 +206,7 @@ struct JITSetupFlow: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 10) {
                     ProgressView().tint(Theme.accent)
-                    Text("Waiting for your \(device)…").font(.system(size: 15, weight: .semibold))
+                    Text(Self.waitingText(device)).font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(Theme.text)
                 }
                 Button("Open Settings") {
@@ -203,6 +222,26 @@ struct JITSetupFlow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(16).hengeCard()
+        #if os(visionOS)
+        case .pin:
+            VStack(spacing: 12) {
+                Text("Type the code Remote Devices shows").font(.system(size: 14))
+                    .foregroundStyle(Theme.textDim)
+                TextField("Code", text: $typedCode)
+                    .keyboardType(.numberPad)
+                    .textContentType(.oneTimeCode)
+                    .font(.system(size: 32, weight: .bold, design: .monospaced))
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(Theme.text)
+                    .onSubmit { pairing.submit(typedCode) }
+                Button("Pair") { pairing.submit(typedCode) }
+                    .buttonStyle(PrimaryButtonStyle())
+                    .disabled(typedCode.filter(\.isNumber).isEmpty)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(18).hengeCard(high: true)
+            .onAppear { typedCode = "" }
+        #else
         case .pin(let pin):
             VStack(spacing: 8) {
                 Text("Enter this code on your \(device)").font(.system(size: 14))
@@ -214,6 +253,7 @@ struct JITSetupFlow: View {
             }
             .frame(maxWidth: .infinity)
             .padding(18).hengeCard(high: true)
+        #endif
         case .paired(let name):
             outcome("Paired with \(name)", ok: true)
         case .failed(let message):
@@ -444,6 +484,7 @@ struct JITSetupFlow: View {
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 12) { actions() }
+                .frame(maxWidth: .infinity) // a bar across the page: with only a text button in it, it was a box over the content
                 .padding(.horizontal, 22).padding(.top, 10).padding(.bottom, 16)
                 .background(Theme.backdrop)
         }

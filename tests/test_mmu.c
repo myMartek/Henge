@@ -9,7 +9,7 @@
 #include "sysreg.h"
 
 #define PT_PA 0x80000000ull
-#define PT_SIZE (1u << 20)
+#define PT_SIZE (1u << 21)
 
 static uint8_t *pt;
 static uint64_t pt_next;
@@ -209,10 +209,14 @@ int main(void) {
     {
         static const struct { uint32_t scale, num, pages; } ranges[2] = {{1, 7, 512}, {2, 2, 6144}};
         const uint64_t base = 0xfffffe0040000000ull;
-        for (int r = 0; r < 2; r++) {
+        /* Pages inside the range and pages past it go in separate passes: with a smaller TLB (HV_TLB_BITS) some of them
+           share a slot, and a page past the range written last would stand in for a dropped one. */
+        for (int rp = 0; rp < 4; rp++) {
+            const int r = rp / 2, inside = !(rp & 1);
             hv_tlb_flush(&cpu);
             const int32_t ks[6] = {0, 1, (int32_t)ranges[r].pages / 2, (int32_t)ranges[r].pages - 1, (int32_t)ranges[r].pages, (int32_t)ranges[r].pages + 300};
             for (int k = 0; k < 6; k++) {
+                if ((ks[k] < (int32_t)ranges[r].pages) != inside) continue;
                 uint64_t va = base + ((uint64_t)ks[k] << 14);
                 HvTlbEntry *t = hv_tlb_ent(&cpu, (va >> 14) & (HV_TLB_SIZE - 1), 1);
                 t->read_tag = va - HV_TLB_ADJ;
@@ -226,10 +230,11 @@ int main(void) {
             cpu.x[1] = 0ull << 48 | 2ull << 46 | (uint64_t)ranges[r].scale << 44 | (uint64_t)ranges[r].num << 39 | ((base >> 14) & 0x1fffffffffull);
             hv_sysreg_sys(&cpu, 0xd5088221u, 0); /* tlbi rvae1is, x1 */
             for (int k = 0; k < 6; k++) {
+                if ((ks[k] < (int32_t)ranges[r].pages) != inside) continue;
                 uint64_t va = base + ((uint64_t)ks[k] << 14);
                 int dropped = hv_tlb_ent(&cpu, (va >> 14) & (HV_TLB_SIZE - 1), 1)->read_tag == HV_TLB_INVALID;
                 checks++;
-                if (dropped != (ks[k] < (int32_t)ranges[r].pages)) {
+                if (dropped != inside) {
                     printf("  FAIL big kernel range %u pages, page %d: %s\n", ranges[r].pages, ks[k], dropped ? "dropped" : "kept");
                     failures++;
                 }
@@ -472,6 +477,132 @@ int main(void) {
             }
         }
         hv_knob[HV_K_WALKLOG] = 1;
+    }
+
+    /* HV_SHARED_KEEP: a process switch keeps user entries live in a 32 MB chunk that both address spaces reach through
+       the same level 2 entry (xnu's nested shared region), and only there. 16 KB granule, 47-bit user VAs. */
+    {
+        static HvCpu c4;
+        hv_cpu_reset_index(&c4, &m, 2);
+        c4.sctlr_el1 = 1, c4.mair_el1 = 0x00ff;
+        c4.tcr_el1 = 17 | 2u << 14 | 25u << 16 | 1u << 30 | 1u << 23 | 5ull << 32;
+        uint64_t ra = alloc_table(), rb = alloc_table();
+        const uint64_t leaf = PT_PA + PT_SIZE - 0x4000; /* RAM, so the TLB takes it */
+        const uint64_t shared = 0x180004000ull, other = 0x182004000ull, priv = 0x100008000ull; /* TLB slots 1, 2049, 2 */
+        map(ra, 14, 47, shared, 3, leaf | PAGE | AF | AP(1), 0);
+        map(ra, 14, 47, other, 3, leaf | PAGE | AF | AP(1), 0);
+        map(ra, 14, 47, priv, 3, leaf | PAGE | AF | AP(1), 0);
+        map(rb, 14, 47, other, 3, leaf | PAGE | AF | AP(1), 0); /* the same page, through B's own level 3 table */
+        map(rb, 14, 47, priv, 3, leaf | PAGE | AF | AP(1), 0);
+        /* B's level 2 entry for the shared chunk: a copy of A's, so the same level 3 table */
+        uint64_t l2a = host(ra)[0] & 0x0000ffffffffc000ull, l2b = host(rb)[0] & 0x0000ffffffffc000ull;
+        host(l2b)[shared >> 25] = host(l2a)[shared >> 25];
+        const uint64_t A = 1ull << 48 | ra, B = 2ull << 48 | rb;
+        const uint64_t vas[3] = {shared, other, priv};
+        for (int knob = 1; knob >= 0; knob--) {
+            hv_knob[HV_K_SHAREDKEEP] = knob;
+            c4.ttbr0_el1 = A;
+            hv_tlb_flush(&c4);
+            for (int k = 0; k < 3; k++) hv_mmu_access(&c4, vas[k], HV_ACC_READ, 0, &pa);
+            c4.ttbr0_el1 = B;
+            hv_tlb_switch_user(&c4, A, B);
+            for (int k = 0; k < 3; k++) {
+                int live = hv_tlb_ent(&c4, (vas[k] >> 14) & (HV_TLB_SIZE - 1), 0)->read_tag == vas[k] - HV_TLB_ADJ;
+                checks++;
+                if (live != (knob && k == 0)) printf("  FAIL shared keep %d, va %llx: %s\n", knob, (unsigned long long)vas[k], live ? "live" : "dropped"), failures++;
+            }
+            /* a kept entry is still on the list a later flush goes by */
+            hv_tlb_flush_user(&c4);
+            checks++;
+            if (hv_tlb_ent(&c4, (shared >> 14) & (HV_TLB_SIZE - 1), 0)->read_tag != HV_TLB_INVALID) printf("  FAIL shared keep %d: a flush left the kept entry\n", knob), failures++;
+            for (int i = 0; i < HV_STASHES; i++) c4.pc_state->stash[i].ttbr0 = 0;
+        }
+
+        /* HV_SHARED_KEEP & 4: xnu never goes from A straight to B, always through a table with nothing in it and ASID 0.
+           That switch is put off: nothing moves until the next TTBR0 says where the CPU really went. */
+#define LIVE(va) (hv_tlb_ent(&c4, ((va) >> 14) & (HV_TLB_SIZE - 1), 0)->read_tag == (va) - HV_TLB_ADJ)
+#define EXPECT(cond, what) do { checks++; if (!(cond)) printf("  FAIL deferred switch (knob %d): %s\n", hv_knob[HV_K_SHAREDKEEP], what), failures++; } while (0)
+#define GO(from, to) do { c4.ttbr0_el1 = (to); hv_tlb_switch_user(&c4, (from), (to)); } while (0)
+#define FRESH() do { \
+        c4.ttbr0_el1 = A; \
+        hv_tlb_flush(&c4); \
+        c4.pc_state->defer_from = 0; \
+        for (int i = 0; i < HV_STASHES; i++) c4.pc_state->stash[i].ttbr0 = 0; \
+        for (int k = 0; k < 3; k++) hv_mmu_access(&c4, vas[k], HV_ACC_READ, 0, &pa); \
+    } while (0)
+        const uint64_t E = alloc_table();               /* nothing in it, ASID 0: xnu's empty table */
+        const uint64_t N = 3ull << 48 | alloc_table();  /* nothing in it yet, but a process's: it has an ASID */
+        for (int knob = 4; knob <= 6; knob++) {
+            hv_knob[HV_K_SHAREDKEEP] = knob;
+            int keeps = knob & 3;
+            /* away to the empty table and back: nothing moves */
+            FRESH();
+            GO(A, E);
+            EXPECT(c4.pc_state->defer_from == A, "a switch to the empty table is not put off");
+            EXPECT(LIVE(shared) && LIVE(other) && LIVE(priv), "an entry went at the switch to the empty table");
+            GO(E, A);
+            EXPECT(c4.pc_state->defer_from == 0, "back at the same process, the switch is still put off");
+            EXPECT(LIVE(shared) && LIVE(other) && LIVE(priv), "an entry went on the way back to the same process");
+            /* on to another process: the switch is from A to B, and only what they share stays (if anything is kept) */
+            GO(A, E);
+            GO(E, B);
+            EXPECT(c4.pc_state->defer_from == 0, "at another process, the switch is still put off");
+            EXPECT(LIVE(shared) == (keeps != 0), keeps ? "the shared entry went" : "the shared entry stayed with nothing kept");
+            EXPECT(!LIVE(other) && !LIVE(priv), "A's own entries are live in B");
+            /* and back to A the same way: its own entries come back from where they were put */
+            GO(B, E);
+            GO(E, A);
+            EXPECT(LIVE(other) && LIVE(priv), "A's own entries did not come back");
+            /* a TLBI while the switch is put off reaches the live entry */
+            FRESH();
+            GO(A, E);
+            hv_tlb_flush_va_page(&c4, priv, 1);
+            EXPECT(!LIVE(priv) && LIVE(shared), "a TLBI by address during a put-off switch");
+            GO(E, A);
+            EXPECT(!LIVE(priv), "an entry dropped by a TLBI is back");
+            /* a TLBI for the whole address space likewise */
+            FRESH();
+            GO(A, E);
+            hv_tlb_flush_user(&c4);
+            hv_tlb_stash_drop(&c4, 1);
+            GO(E, A);
+            EXPECT(!LIVE(shared) && !LIVE(other) && !LIVE(priv), "entries survived a TLBI by ASID during a put-off switch");
+            /* a table with nothing in it but with an ASID is a new process: its switch is done at once */
+            FRESH();
+            GO(A, N);
+            EXPECT(c4.pc_state->defer_from == 0, "a switch to a new process's table is put off");
+            EXPECT(!LIVE(shared) && !LIVE(other) && !LIVE(priv), "A's entries are live in a new process");
+            /* a return to user code ends it: nothing of A stays live under another table */
+            FRESH();
+            GO(A, E);
+            hv_tlb_defer_end(&c4);
+            EXPECT(c4.pc_state->defer_from == 0 && !LIVE(shared) && !LIVE(other) && !LIVE(priv), "A's entries are live after the switch was ended");
+            GO(E, A);
+            EXPECT(LIVE(shared) && LIVE(other) && LIVE(priv), "A's entries did not come back after the switch was ended");
+            /* and if the empty table gets a mapping meanwhile, nothing is filled from it among A's entries */
+            FRESH();
+            GO(A, E);
+            const uint64_t late = 0x100010000ull; /* TLB slot 4 */
+            map(E, 14, 47, late, 3, leaf | PAGE | AF | AP(1), 0);
+            checks++;
+            if (hv_mmu_access(&c4, late, HV_ACC_READ, 0, &pa) != 0) printf("  FAIL deferred switch (knob %d): the late mapping does not translate\n", knob), failures++;
+            EXPECT(!LIVE(late), "an entry was filled while a switch was put off");
+            host(E)[0] = 0; /* the table is empty again for the next round */
+            GO(E, A);
+        }
+        /* without the bit, a switch to the empty table is a switch */
+        hv_knob[HV_K_SHAREDKEEP] = 1;
+        FRESH();
+        GO(A, E);
+        EXPECT(c4.pc_state->defer_from == 0 && !LIVE(shared) && !LIVE(other) && !LIVE(priv), "a switch was put off without its bit");
+        c4.ttbr0_el1 = A;
+        hv_tlb_flush(&c4);
+        for (int i = 0; i < HV_STASHES; i++) c4.pc_state->stash[i].ttbr0 = 0;
+#undef LIVE
+#undef EXPECT
+#undef GO
+#undef FRESH
+        hv_knob[HV_K_SHAREDKEEP] = 0;
     }
 
     printf("%d checks, %d failures\n", checks, failures);

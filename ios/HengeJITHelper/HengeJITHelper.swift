@@ -17,6 +17,10 @@ private enum HengeJITWork {
             .appendingPathComponent("StikJIT", isDirectory: true)
         let paths = DDIPaths.default(in: root)
         var configuration = StikJIT.Configuration.default
+        if let address = request.deviceAddress, !address.isEmpty {
+            configuration.deviceAddress = address
+            NSLog("[HengeJIT] device address: %@", address)
+        }
         /// Appended to the reply so Henge's log shows how the port was chosen.
         var portNote = ""
         var needsScan = false

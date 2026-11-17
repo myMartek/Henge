@@ -10,9 +10,11 @@ final class HengeAppDelegate: NSObject, UIApplicationDelegate {
                      options: UIScene.ConnectionOptions) -> UISceneConfiguration {
         let config = UISceneConfiguration(name: nil, sessionRole: session.role)
         HengeLog.log("display", "scene configuration asked for role \(session.role.rawValue)")
+        #if !os(visionOS)
         if session.role == .windowExternalDisplayNonInteractive, LegacyExternalDisplay.offeredToAppDelegate {
             config.delegateClass = ExternalDisplaySceneDelegate.self
         }
+        #endif
         return config
     }
 }

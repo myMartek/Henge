@@ -5,7 +5,11 @@ import GameController
 /// What this device is, for what the app says and suggests.
 enum Device {
     static let isPad = UIDevice.current.userInterfaceIdiom == .pad
+    #if os(visionOS)
+    static let name = "Apple Vision Pro"
+    #else
     static let name = isPad ? "iPad" : "iPhone"
+    #endif
 
     /// A Mac's screen that fills this device on its side: 1920 wide, as tall as the shape asks. iPads and
     /// squarer phones (iPhone Duo, about 1.46:1) would get bars above and below at 16:9. Phones wider
@@ -196,6 +200,9 @@ final class HardwareMouse {
     func stop() {
         PointerLock.set(false)
         releaseButtons()
+        #if os(visionOS)
+        VisionPointer.shared.reset()
+        #endif
         observers.forEach(NotificationCenter.default.removeObserver)
         observers.removeAll()
         for mouse in mice {
@@ -210,7 +217,13 @@ final class HardwareMouse {
     }
 
     func releaseButtons() {
-        for button in buttons.releaseAll() { henge_vm_mouse_button(button, 0) }
+        for button in buttons.releaseAll() {
+            #if os(visionOS)
+            VisionPointer.shared.button(button, down: false) // let go the way it went down
+            #else
+            henge_vm_mouse_button(button, 0)
+            #endif
+        }
     }
 
     private func attach(_ mouse: GCMouse) {
@@ -226,6 +239,9 @@ final class HardwareMouse {
 
     /// GameController's Y runs upward. What doesn't make a whole step yet waits for the next move.
     private func moved(_ dx: Float, _ dy: Float) {
+        #if os(visionOS)
+        if VisionPointer.shared.leads { return } // the Mac's pointer follows the system's, not the raw motion
+        #endif
         restX += dx * speed
         restY -= dy * speed
         let x = restX.rounded(), y = restY.rounded()
@@ -241,6 +257,21 @@ final class HardwareMouse {
             buttonsLogged += 1
             HengeLog.log("input", "physical mouse button: raw=\(physicalButton) guest=\(guestButton) \(pressed ? "down" : "up")")
         }
+        #if os(visionOS)
+        if VisionPointer.shared.tracks {
+            // A press counts only over the Mac's screen (a click on the controls under the window is not the Mac's),
+            // and once the Mac's pointer has arrived there. Letting go always counts, so no button stays held.
+            guard VisionPointer.shared.isOverMac || !pressed else {
+                _ = buttons.event(physicalButton, pressed: false)
+                return
+            }
+            VisionPointer.shared.whenThere {
+                VisionPointer.shared.button(guestButton, down: pressed)
+                if !pressed { StickyKeys.shared.releaseAll() }
+            }
+            return
+        }
+        #endif
         henge_vm_mouse_button(guestButton, pressed ? 1 : 0)
         if !pressed { StickyKeys.shared.releaseAll() }
     }
@@ -248,7 +279,16 @@ final class HardwareMouse {
     /// GameController puts vertical motion on the first axis and horizontal on the second.
     /// macOS accelerates wheel units roughly quadratically, so use a tunable square root
     /// and cap each event to keep a small pad gesture from jumping across a page.
-    private func scrolled(_ first: Float, _ second: Float) {
+    private func scrolled(_ rawFirst: Float, _ rawSecond: Float) {
+        #if os(visionOS)
+        // A mouse on a Vision Pro reports its wheel on the second axis, upward positive ("0.0, -25.8" for a turn of the
+        // wheel, visionOS 27.3), where a Magic Keyboard on iPad uses the first. Read the iPad's way, a wheel was a
+        // sideways scroll, and the Mac's pages did not move.
+        if VisionPointer.shared.tracks && !VisionPointer.shared.isOverMac { return } // the wheel is for what the pointer is over
+        let first = -rawSecond, second = rawFirst
+        #else
+        let first = rawFirst, second = rawSecond
+        #endif
         // GameController reports both axis states when either one changes. On a
         // Magic Keyboard it calls us twice per movement, with one stale axis in
         // each call; sending both values doubles the scroll and adds sideways drift.
@@ -269,8 +309,15 @@ final class HardwareMouse {
         let vertical = way * Self.wheelUnits(verticalRaw, scale: scale)
         if scrollsLogged < 24 {
             scrollsLogged += 1
-            HengeLog.log("input", "scroll raw: \(first), \(second); units: \(horizontal), \(vertical)")
+            HengeLog.log("input", "scroll raw: \(rawFirst), \(rawSecond); units: \(horizontal), \(vertical)")
         }
+        #if os(visionOS)
+        // While the USB pointer leads, the wheel goes through it too (see VisionPointer.button).
+        if vertical != 0, VisionPointer.shared.wheel(vertical) {
+            if horizontal != 0 { henge_vm_mouse_scroll(horizontal, 0) }
+            return
+        }
+        #endif
         if horizontal != 0 || vertical != 0 { henge_vm_mouse_scroll(horizontal, vertical) }
     }
 

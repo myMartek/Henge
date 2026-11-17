@@ -740,6 +740,19 @@ void hv_vm_touch_frame(uint32_t ts_ms) { hv_xhci_touch_frame(board.usb, ts_ms); 
 
 void hv_vm_touch_button(int down) { hv_xhci_touch_button(board.usb, down); }
 
+int hv_vm_display_size(int *width, int *height) {
+    HvPvgLite *pvg = atomic_load_explicit(&display_pvg, memory_order_acquire);
+    uint32_t w = 0, h = 0;
+    if (!pvg || hv_pvg_lite_screen_size(pvg, &w, &h) != 0) return -1;
+    *width = (int)w, *height = (int)h;
+    return 0;
+}
+
+int hv_vm_pointer_at(int x, int y) { return hv_xhci_pointer(board.usb, x, y); }
+int hv_vm_pointer_button(int button, int down) { return hv_xhci_pointer_button(board.usb, button, down); }
+int hv_vm_pointer_button_at(int button, int down, int x, int y) { return hv_xhci_pointer_button_at(board.usb, button, down, x, y); }
+int hv_vm_pointer_wheel(int amount) { return hv_xhci_pointer_wheel(board.usb, amount); }
+
 int hv_vm_pointer(int *x, int *y) {
     HvPvgLite *pvg = atomic_load_explicit(&display_pvg, memory_order_acquire);
     const uint8_t *page = pvg ? hv_pvg_lite_display_page(pvg) : NULL;
@@ -747,6 +760,11 @@ int hv_vm_pointer(int *x, int *y) {
     uint32_t at = *(const volatile uint32_t *)(page + 0xe00);
     if (at == 0xffffffff) return -1;
     *x = (int)(at & 0xffff), *y = (int)(at >> 16);
+    /* The guest counts on the mode it was started with; the caller on the picture as it is now (pvg_metal.m). */
+    uint32_t w = 0, h = 0, mode_w = 0, mode_h = 0;
+    hv_pvg_lite_mode_size(&mode_w, &mode_h);
+    if (hv_pvg_lite_screen_size(pvg, &w, &h) == 0 && w && h && mode_w && mode_h && (w != mode_w || h != mode_h))
+        *x = (int)((int64_t)*x * w / mode_w), *y = (int)((int64_t)*y * h / mode_h);
     return 0;
 }
 

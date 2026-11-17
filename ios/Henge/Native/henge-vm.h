@@ -41,6 +41,31 @@ int henge_vm_saved_ok(const char *path, const char *ident, uint64_t *bytes, int6
 /* 0 not started, 1 running, 2 stopped, 3 starting/stopping, 4 paused (saved, or being saved).
    Normal guests are fully released before state 2; installer sessions retain
    their restore stack and can_start stays false. */
+/* visionOS spike: a Windows PC through the same calls (henge-vm.c says how). Firmware, its variables, the disk, an
+   installer disk or NULL (installer_first: it is started even if the disk holds a Windows, for a service run, with
+   fresh variables in vars_fd), a shared folder and its socket or NULL. Only where the app is built with HENGE_WINDOWS. */
+int henge_vm_boot_windows(const char *code_fd, const char *vars_fd, const char *disk, const char *installer, int installer_first,
+                          const char *share_dir, const char *share_sock, uint64_t ram_mb, int cpus, char *err, size_t errlen);
+int henge_vm_is_windows(void);       /* the machine running is one */
+int henge_vm_restarts(void);         /* how often the PC restarted itself in this run (kept after it stopped) */
+void henge_vm_power_button(void);    /* ask Windows to shut down */
+int henge_vm_save_png(const char *path); /* the PC's screen as a PNG file; 0 or -1 */
+/* The disk Windows is installed from, made from Microsoft's ESD (WindowsiOS/xros/winmedia): on the caller's thread,
+   minutes. info becomes "edition name\tlanguage\timage index". The two calls after it say how far it is. */
+int henge_win_media_build(const char *esd, const char *image, const char *tmpdir, const char *edition, const char *user,
+                          const char *computer, const char *timezone, const char *drivers, int lean, char *info, size_t infolen,
+                          char *err, size_t errlen);
+/* The screen the PC starts with (1280x720, 1600x900 or 1920x1080), into its firmware's variables. 0 set, 1 not yet
+   possible (a file the firmware has not formatted), -1 failed. */
+int henge_win_set_screen(const char *vars_fd, uint32_t width, uint32_t height);
+/* A disk that only services a Windows already installed: drivers and tuning, nothing else. Needs the ESD for its Windows PE. */
+int henge_win_service_build(const char *esd, const char *image, const char *tmpdir, const char *drivers, int lean, char *err, size_t errlen);
+const char *henge_win_media_step(void);
+double henge_win_media_progress(void);
+/* The first file in a cabinet archive, malloc'd into *out (Microsoft's catalog of Windows images). 0 or -1. */
+int henge_cab_first_file(const uint8_t *cab, size_t len, uint8_t **out, size_t *outlen);
+/* A bzip2 file unpacked into a new one. 0 or -1. */
+int henge_bunzip2_file(const char *from, const char *to);
 int henge_vm_state(void);
 /* A new generation starts with each successful boot, even in the same view. */
 uint64_t henge_vm_generation(void);
@@ -94,6 +119,15 @@ void henge_vm_touch_frame(uint32_t ts_ms); /* commit one frame with every finger
 void henge_vm_touch_button(int down); /* the pad's full press (a click) */
 /* Where the guest has its pointer, in display pixels. 0, or -1 before it has one. */
 int henge_vm_pointer(int *x, int *y);
+/* The Mac's screen as it is now, in its pixels (the Mac may have picked another resolution than it started with).
+   0, or -1 before it shows anything. */
+int henge_vm_display_size(int *width, int *height);
+/* The Mac's pointer to x, y, each 0..32767 across its screen. 0, or -1 when the Mac has no pointer it can be told that. */
+int henge_vm_pointer_at(int x, int y);
+/* That pointer's buttons (0 left, 1 right, 2 middle) and wheel. 0, or -1 as above. */
+int henge_vm_pointer_button(int button, int down);
+int henge_vm_pointer_button_at(int button, int down, int x, int y); /* the button with the pointer's place, as one report */
+int henge_vm_pointer_wheel(int amount);
 /* A small picture of the display, BGRA, width * height * 4 bytes. 0, or -1 before anything shows. */
 int henge_vm_snapshot(uint8_t *bgra, int width, int height);
 

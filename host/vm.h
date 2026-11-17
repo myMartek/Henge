@@ -100,8 +100,19 @@ void hv_vm_mouse_hwheel(int dx);
 void hv_vm_touch(int id, int phase, int x, int y, uint32_t ts_ms);
 void hv_vm_touch_frame(uint32_t ts_ms); /* commit one frame with every finger that moved */
 void hv_vm_touch_button(int down); /* the pad's full press (a click) */
+/* The guest's display as it is now, in its pixels: not what it was started with once the guest has picked another
+   mode. 0, or -1 before it shows anything. */
+int hv_vm_display_size(int *width, int *height);
 /* Where the guest has its pointer, in display pixels. 0, or -1 before it has one. */
 int hv_vm_pointer(int *x, int *y);
+/* Puts the guest's pointer at x, y, each 0..32767 across the whole screen, through the USB pointer (HV_USB_POINTER).
+   0, or -1 when there is none or the guest has not set it up: move it with hv_vm_mouse_move then. */
+int hv_vm_pointer_at(int x, int y);
+/* That pointer's buttons (0 left, 1 right, 2 middle) and wheel (detents, away from the user positive), for as long as
+   it leads the guest's pointer. 0, or -1 as above: use hv_vm_mouse_button and hv_vm_mouse_wheel then. */
+int hv_vm_pointer_button(int button, int down);
+int hv_vm_pointer_button_at(int button, int down, int x, int y); /* with the pointer's place, as one report */
+int hv_vm_pointer_wheel(int amount);
 /* A small picture of the display, BGRA, width * height * 4 bytes. 0, or -1 before anything shows. */
 int hv_vm_snapshot(uint8_t *bgra, int width, int height);
 

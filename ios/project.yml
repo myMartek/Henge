@@ -3,12 +3,15 @@ options:
   bundleIdPrefix: com.henge
   deploymentTarget:
     iOS: "17.0"
+    visionOS: "2.0"
   createIntermediateGroups: true
 
 settings:
   base:
     # The app and its JIT helper follow this together (the helper's id sits under the app's).
     HENGE_BUNDLE_IDENTIFIER: com.henge.app
+    # The visionOS app's name on the device, so that two installs under different identifiers can be told apart.
+    HENGE_DISPLAY_NAME: Henge
     # The app's entitlements file. Override on the xcodebuild command line (the JIT helper doesn't use it, so a
     # personal team can sign the app with fewer entitlements without touching the helper).
     HENGE_ENTITLEMENTS: Henge/Henge.entitlements
@@ -29,6 +32,8 @@ targets:
         excludes:
           - "Resources/**"
           - "Info.plist"
+          - "Vision/Info-visionOS.plist"
+          - "Vision/HengeVision.entitlements"
           - "Henge.entitlements"
           - "Henge.personal.entitlements"
           - "AppIcon.icon/**"
@@ -177,3 +182,190 @@ targets:
       # StikJIT 1.9.0 (MPL-2.0, with idevice under MIT), unmodified; embedded by the app's Embed StikJIT.
       - framework: deps/StikJIT.xcframework
         embed: false
+
+  # visionOS spike: the same app for Apple Vision Pro and its simulator. JIT comes from a debugger that hands the
+  # memory out (JITBootstrap.prewarmVision): lldb on a Mac (xros/lldb/henge_jit.py) or the built-in StikJIT helper
+  # below. Libraries: make xros-lib, tools/build_ios_restore.sh, xros/scripts/build_deps_xros.sh,
+  # xros/scripts/build_stikjit_xros.sh.
+  HengeVision:
+    type: application
+    platform: visionOS
+    deploymentTarget: "2.0"
+    sources:
+      - path: Henge
+        excludes:
+          - "Resources/**"
+          - "Info.plist"
+          - "Vision/Info-visionOS.plist"
+          - "Vision/HengeVision.entitlements"
+          - "Henge.entitlements"
+          - "Henge.personal.entitlements"
+          - "AppIcon.icon/**"
+          - "AppIcon.icon"
+      - path: Henge/Resources
+        buildPhase: resources
+      - path: HengeJITHelper/HengeJITMessages.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(HENGE_BUNDLE_IDENTIFIER)
+        PRODUCT_NAME: Henge
+        CODE_SIGN_STYLE: Automatic
+        INFOPLIST_FILE: Henge/Vision/Info-visionOS.plist
+        # Debugger attach, increased memory limit, and the Network Extensions capability for the loopback tunnel, which
+        # needs a paid team. For a free team: HENGE_VISION_ENTITLEMENTS=Henge/Henge.personal.entitlements on the
+        # xcodebuild command line (the tunnel then cannot be signed: build without it and use lldb for JIT).
+        HENGE_VISION_ENTITLEMENTS: Henge/Vision/HengeVision.entitlements
+        CODE_SIGN_ENTITLEMENTS: $(HENGE_VISION_ENTITLEMENTS)
+        SWIFT_OBJC_BRIDGING_HEADER: Henge/HengeBridge.h
+        TARGETED_DEVICE_FAMILY: "7"
+        SUPPORTED_PLATFORMS: "xros xrsimulator"
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/../core"
+          - "$(SRCROOT)/../host"
+          - "$(SRCROOT)/../devices"
+          # The Windows PC (../../WindowsiOS): two headers of plain types, none of that engine's own.
+          - "$(SRCROOT)/../../WindowsiOS/xros"
+          - "$(SRCROOT)/../../WindowsiOS/xros/winmedia"
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - "$(inherited)"
+          - "HENGE_WINDOWS=1"
+        LIBRARY_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(SRCROOT)/../build/$(PLATFORM_NAME)"
+          - "$(SRCROOT)/../xros/deps/$(PLATFORM_NAME)/lib"
+          - "$(SRCROOT)/../../WindowsiOS/build/$(PLATFORM_NAME)"
+          - "$(SRCROOT)/../../WindowsiOS/xros/deps/$(PLATFORM_NAME)/lib"
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "-lhengevm"
+          - "-lhengerestore"
+          - "-lz"
+          - "-lslirp"
+          - "-lglib-2.0"
+          - "-lintl"
+          - "-lpcre2-8"
+          - "-liconv"
+          - "-lresolv"
+          - "-lcompression"
+          - "-lhengetl"
+          - "-ObjC"
+          - "-lbz2"
+          # Windows: its engine as one object (make xros-lib in ../../WindowsiOS), wimlib for Microsoft's ESD, and the
+          # system's libarchive for the catalog Microsoft publishes as a cabinet file.
+          - "-lwinvm"
+          - "-lwim"
+          - "-larchive"
+          # Pairing for the built-in helper: xros/tools/henge-pair, built for iOS and retagged (build_stikjit_xros.sh).
+          - "-lhenge_rpclient"
+          - "-framework"
+          - "Metal"
+          - "-framework"
+          - "IOSurface"
+          - "-framework"
+          - "AudioToolbox"
+          - "-framework"
+          - "AVFAudio"
+          - "-framework"
+          - "CoreFoundation"
+          - "-framework"
+          - "QuartzCore"
+          - "-framework"
+          - "CoreText"
+          - "-framework"
+          - "ImageIO"
+          - "-framework"
+          - "CoreVideo"
+          - "-framework"
+          - "UniformTypeIdentifiers"
+    dependencies:
+      - target: HengeVisionJITHelper
+      - target: HengeVisionTunnel
+    preBuildScripts:
+      - name: Build the engine
+        script: |
+          set -e
+          cd "$SRCROOT/.."
+          [ -f "xros/deps/$PLATFORM_NAME/lib/libslirp.a" ] || { echo "error: run xros/scripts/build_deps_xros.sh $PLATFORM_NAME first"; exit 1; }
+          [ -d "ios/deps/StikJIT-visionOS.xcframework" ] || { echo "error: run xros/scripts/build_stikjit_xros.sh first"; exit 1; }
+          make xros-lib XR_PLATFORM=$PLATFORM_NAME
+          [ -f "../WindowsiOS/xros/deps/$PLATFORM_NAME/lib/libwim.a" ] || { echo "error: run ../WindowsiOS/xros/build_wimlib_xros.sh $PLATFORM_NAME first"; exit 1; }
+          make -C ../WindowsiOS xros-lib XR_PLATFORM=$PLATFORM_NAME
+          # Programs for the Mac: without Xcode's visionOS SDK in their environment.
+          env -u SDKROOT -u XROS_DEPLOYMENT_TARGET make build/henge-agent.gz build/tl-samples.dmg
+          ./tools/build_ios_restore.sh $PLATFORM_NAME
+        basedOnDependencyAnalysis: false
+    postBuildScripts:
+      - name: Bundle the Mac helper
+        script: |
+          set -e
+          cp "$SRCROOT/../build/henge-agent.gz" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/henge-agent.gz"
+          rm -f "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/tl-samples.dmg"
+          cp -X "$SRCROOT/../build/tl-samples.dmg" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/tl-samples.dmg"
+        basedOnDependencyAnalysis: false
+      - name: Embed StikJIT
+        # As in the iOS target: the helper links StikJIT, which lives in the app's Frameworks. Built from source for
+        # visionOS, so it comes with its own Info.plist.
+        script: |
+          set -e
+          SLICE=xros-arm64
+          [ "$PLATFORM_NAME" = xrsimulator ] && SLICE=xros-arm64-simulator
+          SRC="$SRCROOT/deps/StikJIT-visionOS.xcframework/$SLICE/StikJIT.framework"
+          DST="$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/StikJIT.framework"
+          rm -rf "$DST"
+          mkdir -p "$(dirname "$DST")"
+          ditto "$SRC" "$DST"
+          rm -rf "$DST/Headers" "$DST/Modules"
+          if [ -n "$EXPANDED_CODE_SIGN_IDENTITY" ] && [ "$CODE_SIGNING_ALLOWED" != "NO" ]; then
+            codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --timestamp=none "$DST"
+          fi
+        basedOnDependencyAnalysis: false
+
+  # The built-in StikJIT debugger for visionOS: the iOS helper's sources against the visionOS build of StikJIT.
+  HengeVisionJITHelper:
+    type: app-extension
+    platform: visionOS
+    deploymentTarget: "2.0"
+    sources:
+      - path: HengeJITHelper
+        excludes:
+          - "Info.plist"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(HENGE_BUNDLE_IDENTIFIER).JITHelper
+        PRODUCT_NAME: HengeJITHelper
+        INFOPLIST_FILE: HengeJITHelper/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        APPLICATION_EXTENSION_API_ONLY: YES
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "7"
+        SUPPORTED_PLATFORMS: "xros xrsimulator"
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/../../Frameworks"
+    dependencies:
+      - framework: deps/StikJIT-visionOS.xcframework
+        embed: false
+
+  # visionOS: the loopback tunnel the built-in helper reaches the device through (LocalDevVPN's job on iOS).
+  HengeVisionTunnel:
+    type: app-extension
+    platform: visionOS
+    deploymentTarget: "2.0"
+    sources:
+      - path: HengeVisionTunnel
+        excludes:
+          - "Info.plist"
+          - "HengeVisionTunnel.entitlements"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(HENGE_BUNDLE_IDENTIFIER).Tunnel
+        PRODUCT_NAME: HengeVisionTunnel
+        INFOPLIST_FILE: HengeVisionTunnel/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        APPLICATION_EXTENSION_API_ONLY: YES
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: HengeVisionTunnel/HengeVisionTunnel.entitlements
+        TARGETED_DEVICE_FAMILY: "7"
+        SUPPORTED_PLATFORMS: "xros xrsimulator"
+    dependencies:
+      - sdk: NetworkExtension.framework

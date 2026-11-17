@@ -87,7 +87,11 @@ HENGE_EXPORT bool henge_ios_jit_prewarm(size_t bytes);
 /* The high address blocks held for a Mac app's large reservations (Chromium's allocators), handed out once into
    base[3]/bytes[3]: how many, 0 if none. */
 int henge_ios_take_high_room(void **base, size_t *bytes);
+/* Gives those blocks back for a virtual Mac's RAM, unless a Mac app has taken them. */
+HENGE_EXPORT void henge_ios_jit_release_high_room(void);
 HENGE_EXPORT bool henge_ios_jit_prewarm_self(size_t bytes);
+/* Runs generated code in `count` pages spread over the held region; how many ran, -1 without a region. */
+HENGE_EXPORT int henge_ios_jit_spot_check(int count);
 
 /*
  * The native runtime shares the prewarmed region with QEMU: it takes bytes from the bottom, QEMU the top. Call before

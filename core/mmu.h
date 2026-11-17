@@ -39,6 +39,7 @@ void hv_kva_hist_dump(FILE *f); /* HV_KVA_HIST, see mmu.c */
 void hv_tlb_flush_kernel_range(HvCpu *cpu, uint64_t va, uint64_t len);
 void hv_tlb_flush_user_range(HvCpu *cpu, uint64_t va, uint64_t len);
 void hv_tlb_switch_user(HvCpu *cpu, uint64_t old_ttbr0, uint64_t new_ttbr0); /* a process switch */
+void hv_tlb_defer_end(HvCpu *cpu); /* a switch put off (HV_SHARED_KEEP & 4) is done now: the CPU is about to run user code */
 void hv_tlb_stash_drop(HvCpu *cpu, int asid); /* asid -1: all */
 /* Empty the indirect-branch cache for all user (0) or for kernel (1) VAs. */
 void hv_ijc_reset(HvCpu *cpu, int kernel);

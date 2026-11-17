@@ -6,6 +6,8 @@ import SwiftUI
 import UIKit
 import UserNotifications
 
+#if !os(visionOS) // pairing goes the other way round there: Vision/VisionPairing.swift
+
 /// On-device pairing for Built-in StikJIT (docs/06-built-in-jit.md).
 ///
 /// iOS 27 can pair with a computer it finds on the local network, started from
@@ -184,7 +186,7 @@ import UserNotifications
         endBackground(success: false)
     }
 
-    static var deviceKind: String { UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone" }
+    static var deviceKind: String { Device.name }
 
     nonisolated private static func take(_ string: UnsafeMutablePointer<CChar>?) -> String? {
         guard let string else { return nil }
@@ -335,3 +337,4 @@ import UserNotifications
                                                                      content: content, trigger: nil))
     }
 }
+#endif

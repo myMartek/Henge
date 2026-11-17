@@ -5,6 +5,9 @@ struct StoppedMacView: View {
     let outcome: Int32
     let reason: String
     var start: (() -> Void)? = nil
+    /// A Windows PC stopped (visionOS). `installed`: it was the installation that ended, with Windows shutting down.
+    var windows = false
+    var installed = false
     let close: () -> Void
 
     private var title: String {
@@ -28,10 +31,18 @@ struct StoppedMacView: View {
     var body: some View {
         VStack(spacing: 14) {
             Image(systemName: "power").font(.system(size: 30))
-            Text(title).font(.headline)
-            Text(detail).font(.subheadline).foregroundStyle(.white.opacity(0.7))
-                .multilineTextAlignment(.center)
-            if let start { Button("Start Mac", action: start).buttonStyle(.borderedProminent) }
+            if windows {
+                Text(installed ? "Windows is installed" : outcome == Int32(HENGE_VM_OUTCOME_SHUTDOWN.rawValue) ? "Windows shut down" : "Windows stopped").font(.headline)
+                Text(installed ? "It set itself up and shut down, as its last step. You can start it now."
+                               : outcome == Int32(HENGE_VM_OUTCOME_ERROR.rawValue) ? "It stopped: \(reason). You can start it again." : "You can start it again or return to your machines.")
+                    .font(.subheadline).foregroundStyle(.white.opacity(0.7)).multilineTextAlignment(.center)
+                if let start { Button("Start Windows", action: start).buttonStyle(.borderedProminent) }
+            } else {
+                Text(title).font(.headline)
+                Text(detail).font(.subheadline).foregroundStyle(.white.opacity(0.7))
+                    .multilineTextAlignment(.center)
+                if let start { Button("Start Mac", action: start).buttonStyle(.borderedProminent) }
+            }
             Button("Close", action: close).buttonStyle(.bordered)
         }
         .foregroundStyle(.white)

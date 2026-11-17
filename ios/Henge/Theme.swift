@@ -75,7 +75,9 @@ struct WindowStyle: UIViewRepresentable {
 extension View {
     /// Liquid Glass where iOS has it, for controls floating over a Mac's screen.
     @ViewBuilder func deskGlass<S: Shape>(in shape: S) -> some View {
-        #if compiler(>=6.2)
+        #if os(visionOS)
+        background(.ultraThinMaterial, in: shape) // Liquid Glass's modifier is not offered on visionOS
+        #elseif compiler(>=6.2)
         if #available(iOS 26.0, *) {
             glassEffect(.regular, in: shape)
         } else {
@@ -83,6 +85,16 @@ extension View {
         }
         #else
         background(.ultraThinMaterial, in: shape)
+        #endif
+    }
+
+    /// Buttons without a style of their own are plain coloured text on iOS, and the pages are drawn for that. visionOS
+    /// fills them as a capsule in the tint, which is the colour of their text: a blue pill with nothing to read.
+    @ViewBuilder func deskPlainButtons() -> some View {
+        #if os(visionOS)
+        buttonStyle(.borderless)
+        #else
+        self
         #endif
     }
 

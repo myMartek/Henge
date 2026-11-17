@@ -120,6 +120,7 @@ void hv_eret(HvCpu *cpu) {
     cpu->pc = cpu->elr_el1;
     hv_pstate_set(cpu, cpu->spsr_el1);
     cpu->excl_addr = ~0ull;
+    if (cpu->el == 0 && cpu->pc_state && cpu->pc_state->defer_from) hv_tlb_defer_end(cpu); /* user code runs on its own entries */
 }
 
 static HvCpu *cpu_by_mpidr(HvMachine *m, uint64_t mpidr) {

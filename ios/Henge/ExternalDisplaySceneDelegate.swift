@@ -1,3 +1,4 @@
+#if !os(visionOS) // no external displays on a headset
 import SwiftUI
 import UIKit
 
@@ -43,3 +44,4 @@ final class ExternalDisplaySceneDelegate: UIResponder, UIWindowSceneDelegate, Ex
         HengeLog.log("display", "the Mac left the external display")
     }
 }
+#endif

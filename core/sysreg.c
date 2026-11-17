@@ -415,7 +415,8 @@ void hv_tlbi_apply(HvCpu *cpu, uint32_t op1, uint32_t crn, uint32_t crm, uint32_
                 else if (!have && __atomic_compare_exchange_n(&cpu->m->switch_flush_pc[i], &zero, pc, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) known = 1;
             }
         }
-        if (crm == 7 && hv_knob[HV_K_SWITCHFLUSH] && (since_switch < 480 || late) &&
+        /* Not with HV_SHARED_KEEP: the flush left out counts on a switch leaving no user entry of the old process live. */
+        if (crm == 7 && hv_knob[HV_K_SWITCHFLUSH] && !hv_knob[HV_K_SHAREDKEEP] && (since_switch < 480 || late) &&
             (hv_knob[HV_K_SWITCHFLUSH] < 2 || (nth++ & 127) || !hv_tlb_check_all(cpu))) {
             if (cpu->m->stats_interval) cpu->m->stats.flush_skipped++, cpu->m->stats.flush_skipped_late += (uint64_t)late;
             return;

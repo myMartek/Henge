@@ -54,7 +54,16 @@ struct KeyboardCatcher: UIViewRepresentable {
         func takeKeyboard() {
             guard let window, window.rootViewController?.presentedViewController == nil else { return }
             let holder: UIView = typing ? typer : listener
-            if !holder.isFirstResponder { holder.becomeFirstResponder() }
+            guard !holder.isFirstResponder else { return }
+            #if os(visionOS)
+            // The button that asks sits in an ornament, which keeps the keys to itself until the window is told
+            // to take them (as Everdesk found).
+            window.makeKey()
+            #endif
+            holder.becomeFirstResponder()
+            #if os(visionOS)
+            holder.reloadInputViews()
+            #endif
         }
     }
 
@@ -91,7 +100,9 @@ struct KeyboardCatcher: UIViewRepresentable {
             return host
         }()
 
+        #if !os(visionOS) // visionOS's keyboard takes no accessory row
         override var inputAccessoryView: UIView? { row.view }
+        #endif
         var hasText: Bool { true }
         var autocorrectionType: UITextAutocorrectionType = .no
         var autocapitalizationType: UITextAutocapitalizationType = .none

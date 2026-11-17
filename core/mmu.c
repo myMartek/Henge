@@ -637,6 +637,9 @@ static void tlb_fill(HvCpu *cpu, uint64_t va, int el, const HvWalk *w) {
     int table = hv_tlb_table(cpu, el);
     uint32_t slot = (uint32_t)(va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1);
     HvTlbEntry *e = hv_tlb_ent(cpu, slot, table);
+    /* A switch is put off (HV_SHARED_KEEP & 4), so the table in place was empty: if it maps this after all, the entry
+       must not join the old process's. The slow path serves the access; the switch is done by the next TTBR0 or ERET. */
+    if (!((page_va >> 55) & 1) && cpu->pc_state && cpu->pc_state->defer_from) return;
     if (!((page_va >> 55) & 1)) {
         if (cpu->nuser_fills < HV_USER_FILLS) cpu->user_fills[cpu->nuser_fills] = (uint16_t)hv_tlb_code(slot, table);
         if (cpu->nuser_fills <= HV_USER_FILLS) cpu->nuser_fills++;
@@ -870,7 +873,11 @@ int hv_tlb_refill(HvCpu *cpu, uint64_t va, uint32_t flags) {
     if (w.fsc) return 1;
     HvTlbEntry *e = hv_tlb_ent(cpu, (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), table);
     uint64_t tag = write ? e->write_tag : e->read_tag;
-    if (cpu->m->stats_interval) cpu->m->stats.refills++;
+    if (cpu->m->stats_interval) {
+        cpu->m->stats.refills++;
+        if (!el) cpu->m->stats.refill_el0_va[va - 0x180000000ull < (8ull << 30) ? 0 : va < (1ull << 36) ? 1 : va < (1ull << 39) ? 2 : 3]++;
+        cpu->m->stats.refill_map[el][w.block_size <= (1ull << HV_TLB_PAGE_BITS) ? 0 : w.block_size <= (32ull << 20) ? 1 : 2]++;
+    }
     return tag != HV_TLB_INVALID && tag + HV_TLB_ADJ == (va & ~(uint64_t)PAGE_MASK) ? 0 : 1;
 }
 
@@ -1181,7 +1188,12 @@ int hv_tlb_check_all(HvCpu *cpu) {
             }
             if (why) {
                 bad++;
-                if (told++ < 16)
+                /* Which kind: a live user entry is one a program would use now. One put aside is used only if its
+                   process comes back before a TLBI retires it; a kernel entry is none of a process switch's doing. */
+                int kind = s ? 2 : (va >> 55) & 1 ? 1 : 0;
+                if (m->stats_interval) m->stats.check_kind[kind]++;
+                static int told_live;
+                if (told++ < 16 || (kind == 0 && told_live++ < 16))
                     fprintf(stderr, "hengevm: switch-flush check: %s entry (table %d, va %llx, ttbr0 %llx) is out of date: %s (fsc %x)\n",
                             s ? "stashed" : "live", table, (unsigned long long)va, (unsigned long long)cpu->ttbr0_el1, why, w.fsc);
             }
@@ -1197,15 +1209,155 @@ int hv_tlb_check_all(HvCpu *cpu) {
     return bad;
 }
 
+/* HV_SHARED_KEEP=1: user entries stay live across a process switch when both address spaces reach them through the
+   same page table. xnu nests the dyld shared region: every process's level 2 entries for it point at the same level 3
+   tables, so a translation found through one of those tables is the same in every process that shares it. A switch
+   compares the old and the new process's level 2 entries over SHARED_CHUNKS 32 MB chunks from SHARED_LO (and the
+   level 1 entry's table attributes above them); where they are equal, the entries in that chunk are neither put aside
+   nor dropped. Nothing else changes: a TLBI by VA drops the slot whatever its ASID, and one by ASID drops every user
+   entry. 16 KB granule with more than a 36-bit user VA only (macOS's); anything else keeps nothing.
+   HV_SHARED_KEEP=2 (checking): also walks every live and stashed entry again after one kept switch in 64
+   (hv_tlb_check_all), counted as bad in the stats if any no longer matches. */
+#define SHARED_LO 0x180000000ull
+#define SHARED_CHUNKS 256 /* 8 GB */
+
+static int shared_keep_on(void) {
+    return hv_knob[HV_K_SHAREDKEEP] & 3;
+}
+
+/* HV_SHARED_KEEP & 4 (visionOS spike, not from the pull request the rest came with): a switch to xnu's empty table is
+   put off. Measured on a Vision Pro with macOS 27.2: xnu never writes one process's TTBR0 after another's. Every
+   switch goes through a table with nothing in it (pmap_clear_user_ttb: break before make for the ASID), 7500 times a
+   second each way, and most of the time it comes back to the process it left. So the comparison above never saw two
+   processes, and every such round trip put a hundred or two entries aside and brought them back.
+   Put off, the switch to the empty table changes nothing: the entries stay live, and whose they are is kept in
+   HvPerCpu.defer_from. The next TTBR0 says what the switch really was: the same address space, nothing to do; another,
+   the switch from the one remembered to that one, shared chunks compared as above.
+   While it is put off, a kernel access to a user address finds the old process's entry where a real CPU would fault
+   (its entries are under another ASID). xnu touches no user memory with the empty table in place. What must not
+   happen is a real address space taken for the empty table, a new process's still without a mapping: its user code,
+   or the kernel copying into it, would use the old process's memory. Hence all of: the table carries ASID 0, which
+   xnu gives no process (its empty table has it); its root holds no valid entry; nothing is filled for a user address
+   while a switch is put off (tlb_fill); and a return to EL0 does the switch first (hv_tlb_defer_end). */
+static int defer_on(void) {
+    return hv_knob[HV_K_SHAREDKEEP] & 4;
+}
+
+/* HV_SHARED_KEEP & 8: every 64th process switch is followed by the check (hv_tlb_check_all) whether anything was kept
+   or not. Alone (HV_SHARED_KEEP=8) nothing is kept and nothing put off: what the check finds then is what it finds
+   anyway, to hold what it finds with them against. */
+static int check_always(void) {
+    return hv_knob[HV_K_SHAREDKEEP] & 8;
+}
+
+/* ttbr0 is xnu's empty table: ASID 0 and a root table with no valid entry. 16 KB granule, as user_l2_table. */
+static int empty_space(HvCpu *cpu, uint64_t ttbr0) {
+    uint64_t tcr = cpu->tcr_el1;
+    int inputsize = 64 - (int)(tcr & 63);
+    if (granule_bits((tcr >> 14) & 3, 0) != 14 || inputsize <= 36 || inputsize > 48 || ((tcr >> 7) & 1) || ((tcr >> 22) & 1)) return 0;
+    uint64_t root = ttbr0 & OA_MASK & ~1ull;
+    uint32_t n = 1u << (inputsize > 47 ? inputsize - 47 : inputsize - 36);
+    HvRam *r = ram_of(cpu->m, root);
+    if (!r || root + (uint64_t)n * 8 - r->pa > r->size) return 0;
+    const uint64_t *d = (const uint64_t *)(const void *)(r->host + (root - r->pa));
+    uint64_t any = 0;
+    for (uint32_t i = 0; i < n; i++) any |= __atomic_load_n(&d[i], __ATOMIC_RELAXED);
+    if (any & 1) return 0;
+    if (ttbr0 >> 48) { /* nothing in it, but somebody's: a process about to get its first mapping */
+        if (cpu->m->stats_interval) cpu->m->stats.defers[4]++;
+        return 0;
+    }
+    return 1;
+}
+
+/* Why a switch kept nothing (stats: on a Vision Pro, macOS 27.2 switched 13000 times a second for half an hour and
+   not one switch kept an entry). */
+enum { HV_SW_NO_OLD, HV_SW_OVERFLOW, HV_SW_CONFIG, HV_SW_OLD_EMPTY, HV_SW_NEW_EMPTY, HV_SW_ATTRS, HV_SW_SAME, HV_SW_NONE_EQUAL };
+
+static void shared_why(HvCpu *cpu, int why) {
+    if (cpu->m->stats_interval) cpu->m->stats.shared_why[why]++;
+}
+
+/* Level 2 table of address space ttbr0's first 64 GB, or 0; the table attributes on the way in *attrs. *config is
+   set if it is the translation's set-up that this does not cover, not the table. */
+static uint64_t user_l2_table(HvCpu *cpu, uint64_t ttbr0, uint64_t *attrs, int *config) {
+    uint64_t tcr = cpu->tcr_el1;
+    int inputsize = 64 - (int)(tcr & 63);
+    *config = 0;
+    if (granule_bits((tcr >> 14) & 3, 0) != 14 || inputsize <= 36 || inputsize > 48 || ((tcr >> 7) & 1)) {
+        static int said;
+        if (!__atomic_exchange_n(&said, 1, __ATOMIC_RELAXED)) fprintf(stderr, "hengevm: shared keep: not for this translation set-up (TCR_EL1 %#llx)\n", (unsigned long long)tcr);
+        *config = 1;
+        return 0;
+    }
+    uint64_t t = ttbr0 & OA_MASK & ~1ull, d;
+    *attrs = 0;
+    for (int level = inputsize > 47 ? 0 : 1; level <= 1; level++) { /* index 0 at each: VAs below 64 GB */
+        if (read_desc(cpu->m, t, &d) != 0 || (d & 3) != 3) return 0;
+        *attrs = *attrs << 5 | d >> 59;
+        t = d & OA_MASK & ~((1ull << 14) - 1);
+    }
+    return t;
+}
+
+/* Chunks (bit c: SHARED_LO + c * 32 MB) that old and now reach through the same level 2 entry. */
+static int shared_chunks(HvCpu *cpu, uint64_t old, uint64_t now, uint64_t keep[SHARED_CHUNKS / 64]) {
+    memset(keep, 0, SHARED_CHUNKS / 8);
+    uint64_t ao = 0, an = 0;
+    int co = 0, cn = 0;
+    uint64_t to = user_l2_table(cpu, old, &ao, &co), tn = user_l2_table(cpu, now, &an, &cn);
+    if (!to || !tn || ao != an || to == tn) { /* the same table: the same process, nothing to compare */
+        shared_why(cpu, co || cn ? HV_SW_CONFIG : !to ? HV_SW_OLD_EMPTY : !tn ? HV_SW_NEW_EMPTY : ao != an ? HV_SW_ATTRS : HV_SW_SAME);
+        return 0;
+    }
+    int any = 0;
+    for (uint32_t c = 0; c < SHARED_CHUNKS; c++) {
+        uint64_t off = ((SHARED_LO >> 25) + c) * 8, a, b;
+        if (read_desc(cpu->m, to + off, &a) != 0 || read_desc(cpu->m, tn + off, &b) != 0) { any = 0; break; }
+        if (a == b && (a & 1)) keep[c / 64] |= 1ull << (c % 64), any = 1;
+    }
+    if (!any) shared_why(cpu, HV_SW_NONE_EQUAL);
+    return any;
+}
+
+static int entry_kept(const HvTlbEntry *e, const uint64_t keep[SHARED_CHUNKS / 64]) {
+    uint64_t tag = e->read_tag != HV_TLB_INVALID ? e->read_tag + HV_TLB_ADJ : e->exec_tag != HV_TLB_INVALID ? hv_exec_key(e->exec_tag, e->addend) : e->write_tag + HV_TLB_ADJ;
+    uint64_t c = ((tag & 0x00ffffffffffffffull) - SHARED_LO) >> 25;
+    return c < SHARED_CHUNKS && (keep[c / 64] >> (c % 64) & 1);
+}
+
 /* TTBR0 went from old to now (a process switch): keep old's user entries
    aside, drop them from the TLB, and bring back now's if they were kept and no
    TLBI touched them since. */
+static void switch_user(HvCpu *cpu, uint64_t old, uint64_t now, int may_defer);
+
 void hv_tlb_switch_user(HvCpu *cpu, uint64_t old, uint64_t now) {
+    switch_user(cpu, old, now, 1);
+}
+
+void hv_tlb_defer_end(HvCpu *cpu) {
+    HvPerCpu *p = cpu->pc_state;
+    if (!p || !p->defer_from) return;
+    if (cpu->m->stats_interval) cpu->m->stats.defers[3]++;
+    switch_user(cpu, cpu->ttbr0_el1, cpu->ttbr0_el1, 0); /* from the address space remembered to the one in place */
+}
+
+static void switch_user(HvCpu *cpu, uint64_t old, uint64_t now, int may_defer) {
     HvPerCpu *p = cpu->pc_state;
     HvMachine *m = cpu->m;
-    if (old == now) return; /* the same address space: a TLB tagged by ASID would keep everything too */
     static int no_stash = -1; /* HV_NO_STASH: a switch just drops the user entries */
     if (no_stash < 0) no_stash = getenv("HV_NO_STASH") != NULL;
+    if (p && p->defer_from) { /* a switch was put off: the entries live are that address space's, not old's (the empty table) */
+        old = p->defer_from;
+        p->defer_from = 0;
+        if (m->stats_interval && may_defer) m->stats.defers[old == now ? 1 : 2]++;
+    }
+    if (old == now) return; /* the same address space: a TLB tagged by ASID would keep everything too */
+    if (may_defer && defer_on() && p && old && current_asid(cpu) >= 0 && !m->watch_va && !m->watch_pa && !no_stash && empty_space(cpu, now)) {
+        p->defer_from = old;
+        if (m->stats_interval) m->stats.defers[0]++;
+        return;
+    }
     if (!p || current_asid(cpu) < 0 || m->watch_va || m->watch_pa || no_stash) {
         hv_tlb_flush_user(cpu);
         return;
@@ -1231,11 +1383,23 @@ void hv_tlb_switch_user(HvCpu *cpu, uint64_t old, uint64_t now) {
         if (m->stats_interval) m->stats.stash_saves++;
     }
     uint32_t k = 0;
+    uint64_t keep[SHARED_CHUNKS / 64];
+    int keeping = 0;
+    if (shared_keep_on()) {
+        if (!old) shared_why(cpu, HV_SW_NO_OLD);
+        else if (n > HV_USER_FILLS) shared_why(cpu, HV_SW_OVERFLOW);
+        else keeping = shared_chunks(cpu, old, now, keep);
+    }
+    uint32_t nkept = 0;
     if (n <= HV_USER_FILLS) {
         for (uint32_t i = 0; i < n; i++) {
             uint16_t code = cpu->user_fills[i];
             HvTlbEntry *e = &cpu->tlb[0] + code;
             if (!user_entry(e)) continue; /* the slot may hold a kernel page by now */
+            if (keeping && entry_kept(e, keep)) {
+                cpu->user_fills[nkept++] = code; /* nkept <= i: the list is rewritten in place behind the read */
+                continue;
+            }
             if (s) {
                 s->slot[k] = code;
                 s->ent[k++] = *e;
@@ -1248,6 +1412,8 @@ void hv_tlb_switch_user(HvCpu *cpu, uint64_t old, uint64_t now) {
                 if (user_entry(hv_tlb_ent(cpu, i, t))) memset(hv_tlb_ent(cpu, i, t), 0x80, sizeof(HvTlbEntry));
     }
     if (s) s->n = k;
+    cpu->nuser_fills = nkept;
+    if (keeping && m->stats_interval) m->stats.shared_keeps++, m->stats.shared_kept += nkept;
 
     for (int i = 0; i < HV_STASHES; i++) {
         HvTlbStash *r = &p->stash[i];
@@ -1268,7 +1434,8 @@ void hv_tlb_switch_user(HvCpu *cpu, uint64_t old, uint64_t now) {
                 continue; /* its page had a TLBI while it was put aside (stash_drop_va) */
             HvTlbEntry *e = &cpu->tlb[0] + r->slot[j];
             *e = *from;
-            cpu->user_fills[cpu->nuser_fills++] = r->slot[j];
+            if (cpu->nuser_fills < HV_USER_FILLS) cpu->user_fills[cpu->nuser_fills] = r->slot[j];
+            cpu->nuser_fills++; /* past HV_USER_FILLS: the next flush scans the whole TLB */
             if (e->write_tag != HV_TLB_INVALID) {
                 const uint8_t *host = (const uint8_t *)(uintptr_t)(from->write_tag + HV_TLB_ADJ + from->addend);
                 HvRam *ram = ram_of_host(m, host);
@@ -1289,4 +1456,9 @@ void hv_tlb_switch_user(HvCpu *cpu, uint64_t old, uint64_t now) {
         break;
     }
     walk_end(cpu);
+    static _Thread_local uint32_t nth_kept;
+    if (((keeping && shared_keep_on() >= 2) || check_always()) && !(nth_kept++ & 63) && hv_tlb_check_all(cpu)) {
+        if (m->stats_interval) m->stats.shared_bad++;
+        hv_tlb_flush_user(cpu);
+    }
 }

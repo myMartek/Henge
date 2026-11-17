@@ -126,6 +126,44 @@ static const uint8_t tp_config_desc[34] = {
 
 static const char *const tp_strings[] = {NULL, "Apple Inc.", "Magic Trackpad 2", "HengeVM"};
 
+/* Port 3, when HV_USB_POINTER is set: a USB HID pointer whose X and Y are positions, not movements, as a tablet's
+   are: QEMU's "usb-tablet", with its IDs and its report descriptor, which macOS guests have long been run with.
+   Virtualization.framework gives a Mac guest the same kind of thing (its screen-coordinate pointing device). A
+   report is six bytes: buttons, X, Y (little-endian, 0..0x7fff across the whole screen), wheel. While the pointer
+   is led this way its buttons and wheel come this way too, not over the virtio mouse: a button from that one, with
+   the pointer placed by this one, moved the Mac's pointer a few centimetres at every press and release (macOS
+   seems to apply that mouse's last movement again with each of its reports). */
+
+static const uint8_t ptr_report_desc[] = {
+    0x05, 0x01, 0x09, 0x02, 0xa1, 0x01,       /* usage page (generic desktop), usage (mouse), collection (application) */
+    0x09, 0x01, 0xa1, 0x00,                  /* usage (pointer), collection (physical) */
+    0x05, 0x09, 0x19, 0x01, 0x29, 0x03, 0x15, 0x00, 0x25, 0x01, /* buttons 1-3 */
+    0x95, 0x03, 0x75, 0x01, 0x81, 0x02,
+    0x95, 0x01, 0x75, 0x05, 0x81, 0x01,
+    0x05, 0x01, 0x09, 0x30, 0x09, 0x31,       /* X, Y */
+    0x15, 0x00, 0x26, 0xff, 0x7f, 0x35, 0x00, 0x46, 0xff, 0x7f, /* 0..0x7fff, logical and physical */
+    0x75, 0x10, 0x95, 0x02, 0x81, 0x02,       /* two 16-bit values, absolute */
+    0x05, 0x01, 0x09, 0x38,                   /* wheel */
+    0x15, 0x81, 0x25, 0x7f, 0x35, 0x00, 0x45, 0x00,
+    0x75, 0x08, 0x95, 0x01, 0x81, 0x06,       /* one byte, relative */
+    0xc0, 0xc0,
+};
+
+static const uint8_t ptr_device_desc[18] = {
+    18, 1, 0x00, 0x02, 0, 0, 0, 64, /* USB 2.0, class per interface, EP0 64 bytes */
+    0x27, 0x06, 0x01, 0x00,         /* vendor 0x0627, product 0x0001: QEMU's USB tablet */
+    0x00, 0x01, 1, 2, 3, 1,         /* bcdDevice 1.00, strings 1-3, one configuration */
+};
+
+static const uint8_t ptr_config_desc[34] = {
+    9, 2, 34, 0, 1, 1, 0, 0xa0, 50,           /* one interface, remote wakeup, 100 mA */
+    9, 4, 0, 0, 1, 3, 0, 0, 0,                /* interface 0: HID, no boot protocol */
+    9, 0x21, 0x11, 0x01, 0, 1, 0x22, sizeof ptr_report_desc, 0, /* HID 1.11, one report descriptor */
+    7, 5, 0x81, 3, 8, 0, 8,                   /* EP1 IN, interrupt, 8 bytes, every 8 ms */
+};
+
+static const char *const ptr_strings[] = {NULL, "HengeVM", "HengeVM USB Pointer", "1"};
+
 struct HvXhciDev {
     const char *const *strings;
     const uint8_t *device_desc;
@@ -136,6 +174,7 @@ struct HvXhciDev {
 static const struct HvXhciDev devs[HV_XHCI_DEVICES] = {
     {kbd_strings, kbd_device_desc, kbd_config_desc, kbd_report_desc, sizeof kbd_report_desc},
     {tp_strings, tp_device_desc, tp_config_desc, tp_report_desc, sizeof tp_report_desc},
+    {ptr_strings, ptr_device_desc, ptr_config_desc, ptr_report_desc, sizeof ptr_report_desc},
 };
 
 static int xlog(void) {
@@ -373,7 +412,12 @@ static int control(HvXhci *x, int slot, const uint8_t setup[8], uint8_t *out, in
         src = tmp, len = 1;
     } else if (type == 0xa1 && req == 1) { /* GET_REPORT: wValue is (type << 8) | report ID */
         if (x->slots[slot].dev == 0) src = x->state, len = 8;
-        else {
+        else if (x->slots[slot].dev == 2) {
+            pthread_mutex_lock(&x->mu);
+            memcpy(tmp, x->ptr_state, HV_PTR_REPORT_LEN);
+            pthread_mutex_unlock(&x->mu);
+            src = tmp, len = HV_PTR_REPORT_LEN;
+        } else {
             int rtype = value >> 8, rid = value & 0xff;
             if (rtype == 3) { /* feature: the sensor-configuration registers */
                 if (rid == 0x01) { /* the header for the register just selected */
@@ -505,6 +549,20 @@ static void run_ep_in(HvXhci *x, int slot) {
             wr(x, buf, x->reports[x->rhead % HV_XHCI_REPORTS], n);
             x->rhead++;
             x->delivered++;
+            transfer_event(x, at, n < want ? CC_SHORT_PACKET : CC_SUCCESS, want - n, slot, dci);
+        }
+    } else if (s->dev == 2) {
+        while (x->ptr_rhead != x->ptr_rtail && ring_peek(x, r, trb, &at)) {
+            int type = (trb[3] >> 10) & 0x3f;
+            ring_advance(r);
+            if (type != TRB_NORMAL) continue;
+            uint64_t buf = (uint64_t)trb[1] << 32 | trb[0];
+            uint32_t want = trb[2] & 0x1ffff;
+            uint32_t n = want < HV_PTR_REPORT_LEN ? want : HV_PTR_REPORT_LEN;
+            wr(x, buf, x->ptr_reports[x->ptr_rhead % HV_PTR_REPORTS], n);
+            x->ptr_rhead++;
+            x->ptr_delivered++;
+            if (x->ptr_delivered == 1) fprintf(stderr, "hengevm: xhci: pointer: the guest takes its reports\n");
             transfer_event(x, at, n < want ? CC_SHORT_PACKET : CC_SUCCESS, want - n, slot, dci);
         }
     } else {
@@ -701,11 +759,16 @@ static void run_commands(HvXhci *x) {
 /* ---- ports ---- */
 
 /* Port 1 is the full-speed keyboard; port 2 is the high-speed trackpad, as the real
-   Magic Trackpad 2 is. */
+   Magic Trackpad 2 is; port 3 is the full-speed pointer, or has nothing in it. */
+static uint32_t port_start(const HvXhci *x, int p) {
+    if (p == 2 && !x->ptr_on) return PORT_PP; /* powered, nothing connected */
+    return PORT_PP | PORT_CCS | PORT_CSC | (uint32_t)(p == 1 ? SPEED_HIGH : SPEED_FULL) << PORT_SPEED_SHIFT | 7u << PORT_PLS_SHIFT;
+}
+
 static void port_connect(HvXhci *x) {
     for (int p = 0; p < HV_XHCI_PORTS; p++) {
-        x->portsc[p] = PORT_PP | PORT_CCS | PORT_CSC | (uint32_t)(p ? SPEED_HIGH : SPEED_FULL) << PORT_SPEED_SHIFT | 7u << PORT_PLS_SHIFT;
-        port_event(x, p);
+        x->portsc[p] = port_start(x, p);
+        if (x->portsc[p] & PORT_CCS) port_event(x, p);
     }
 }
 
@@ -760,8 +823,11 @@ static void reset(HvXhci *x) {
     x->tp_db = 0;
     x->tp_multi_logs = 0;
     x->tp_f1_len = 0;
-    for (int p = 0; p < HV_XHCI_PORTS; p++)
-        x->portsc[p] = PORT_PP | PORT_CCS | PORT_CSC | (uint32_t)(p ? SPEED_HIGH : SPEED_FULL) << PORT_SPEED_SHIFT | 7u << PORT_PLS_SHIFT;
+    x->ptr_ready = 0;
+    memset(x->ptr_state, 0, sizeof x->ptr_state);
+    x->ptr_rhead = x->ptr_rtail = 0;
+    x->ptr_delivered = 0;
+    for (int p = 0; p < HV_XHCI_PORTS; p++) x->portsc[p] = port_start(x, p);
     update_irq(x);
 }
 
@@ -1112,16 +1178,99 @@ void hv_xhci_touch_button(HvXhci *x, int down) {
     hv_machine_wake(x->m);
 }
 
+/* Queues the pointer's state as a report (under mu). Only where the pointer is now matters, so a waiting report
+   that differs in nothing but position is replaced; a button's change or a wheel turn is an event of its own, and
+   is neither replaced nor replaces one. */
+static void ptr_queue(HvXhci *x, int event) {
+    const uint8_t *s = x->ptr_state;
+    uint32_t waiting = x->ptr_rtail - x->ptr_rhead;
+    if (!event && waiting >= 2) {
+        uint8_t *last = x->ptr_reports[(x->ptr_rtail - 1) % HV_PTR_REPORTS];
+        if (last[0] == s[0] && last[5] == 0) {
+            memcpy(last, s, HV_PTR_REPORT_LEN);
+            return;
+        }
+    }
+    if (waiting >= HV_PTR_REPORTS) x->ptr_rhead++; /* full: the oldest goes */
+    memcpy(x->ptr_reports[x->ptr_rtail++ % HV_PTR_REPORTS], s, HV_PTR_REPORT_LEN);
+}
+
+int hv_xhci_pointer(HvXhci *x, int px, int py) {
+    if (!x || !x->ptr_on || !x->ptr_ready) return -1;
+    if (px < 0) px = 0;
+    if (px > HV_PTR_MAX) px = HV_PTR_MAX;
+    if (py < 0) py = 0;
+    if (py > HV_PTR_MAX) py = HV_PTR_MAX;
+    pthread_mutex_lock(&x->mu);
+    uint8_t *s = x->ptr_state;
+    s[1] = (uint8_t)px, s[2] = (uint8_t)(px >> 8), s[3] = (uint8_t)py, s[4] = (uint8_t)(py >> 8);
+    ptr_queue(x, 0);
+    pthread_mutex_unlock(&x->mu);
+    hv_machine_wake(x->m);
+    return 0;
+}
+
+int hv_xhci_pointer_button(HvXhci *x, int button, int down) {
+    if (!x || !x->ptr_on || !x->ptr_ready || button < 0 || button > 2) return -1;
+    pthread_mutex_lock(&x->mu);
+    uint8_t bit = (uint8_t)(1u << button), was = x->ptr_state[0];
+    x->ptr_state[0] = down ? was | bit : was & (uint8_t)~bit;
+    if (x->ptr_state[0] != was) ptr_queue(x, 1);
+    pthread_mutex_unlock(&x->mu);
+    hv_machine_wake(x->m);
+    return 0;
+}
+
+int hv_xhci_pointer_button_at(HvXhci *x, int button, int down, int px, int py) {
+    if (!x || !x->ptr_on || !x->ptr_ready || button < 0 || button > 2) return -1;
+    if (px < 0) px = 0;
+    if (px > HV_PTR_MAX) px = HV_PTR_MAX;
+    if (py < 0) py = 0;
+    if (py > HV_PTR_MAX) py = HV_PTR_MAX;
+    pthread_mutex_lock(&x->mu);
+    uint8_t *s = x->ptr_state;
+    uint8_t bit = (uint8_t)(1u << button);
+    s[0] = down ? s[0] | bit : s[0] & (uint8_t)~bit;
+    s[1] = (uint8_t)px, s[2] = (uint8_t)(px >> 8), s[3] = (uint8_t)py, s[4] = (uint8_t)(py >> 8);
+    ptr_queue(x, 1);
+    pthread_mutex_unlock(&x->mu);
+    hv_machine_wake(x->m);
+    return 0;
+}
+
+int hv_xhci_pointer_wheel(HvXhci *x, int amount) {
+    if (!x || !x->ptr_on || !x->ptr_ready) return -1;
+    pthread_mutex_lock(&x->mu);
+    while (amount) { /* a report carries -127..127 */
+        int piece = amount > 127 ? 127 : amount < -127 ? -127 : amount;
+        x->ptr_state[5] = (uint8_t)(int8_t)piece;
+        ptr_queue(x, 1);
+        amount -= piece;
+    }
+    x->ptr_state[5] = 0; /* the wheel is a movement: said once */
+    pthread_mutex_unlock(&x->mu);
+    hv_machine_wake(x->m);
+    return 0;
+}
+
 void hv_xhci_poll(HvXhci *x) {
     if (!x) return;
-    for (int slot = 1; slot <= HV_XHCI_SLOTS; slot++)
-        if (x->slots[slot].dev >= 0) run_ep_in(x, slot);
+    int ptr_ready = 0;
+    for (int slot = 1; slot <= HV_XHCI_SLOTS; slot++) {
+        if (x->slots[slot].dev < 0) continue;
+        run_ep_in(x, slot);
+        if (x->slots[slot].dev == 2 && x->slots[slot].configured)
+            for (int d = 2; d < HV_XHCI_EPS; d++) if (x->slots[slot].ep_running[d]) ptr_ready = 1;
+    }
+    x->ptr_ready = ptr_ready;
 }
 
 HvXhci *hv_xhci_create(HvMachine *m, HvPcie *bus) {
     HvXhci *x = calloc(1, sizeof *x);
     x->m = m;
     pthread_mutex_init(&x->mu, NULL);
+    const char *pointer = getenv("HV_USB_POINTER");
+    x->ptr_on = pointer && *pointer && strcmp(pointer, "0") != 0;
     /* QEMU's xHCI IDs. Class 0x0c0330 with revision 0: macOS's IOPCIClassMatch compares all 32 bits. */
     hv_pci_init(&x->pci, 0x1b36, 0x000d, 0x0c033000, 0x1af4, 0x1100);
     x->pci.opaque = x;

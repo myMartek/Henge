@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- The visionOS app with its own loopback tunnel (HengeVisionTunnel). The Network Extensions capability needs a
+     paid developer team; a free team signs Henge.personal.entitlements and gets JIT from lldb on a Mac instead. -->
+<dict>
+	<!-- Debugger attach for JIT (Henge.entitlements). -->
+	<key>get-task-allow</key>
+	<true/>
+	<!-- Room for guest RAM and the JIT region (Henge.entitlements). -->
+	<key>com.apple.developer.kernel.increased-memory-limit</key>
+	<true/>
+	<!-- Guest RAM and the JIT region's two mappings beside the 64 GB an app has otherwise (Henge.entitlements). -->
+	<key>com.apple.developer.kernel.extended-virtual-addressing</key>
+	<true/>
+	<!-- Starting the loopback tunnel the built-in JIT helper reaches this device through. -->
+	<key>com.apple.developer.networking.networkextension</key>
+	<array>
+		<string>packet-tunnel-provider</string>
+	</array>
+</dict>
+</plist>

@@ -265,7 +265,7 @@ struct MacAppRunView: View {
         }
         .background(Desk.page)
         .navigationTitle(app.name)
-        .fullScreenCover(isPresented: $showScreen) { MacAppScreen(app: app) }
+        .fullScreenCover(isPresented: $showScreen) { MacAppScreen(app: app).deskPlainButtons() }
         .confirmationDialog("Delete \(app.name)?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete", role: .destructive) { store.delete(app); dismiss() }
         }

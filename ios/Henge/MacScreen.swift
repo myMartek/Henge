@@ -104,8 +104,10 @@ final class MacScreenUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         arrow.shadowOffset = CGSize(width: 0, height: 1)
         layer.addSublayer(arrow)
         applyMode()
+        #if !os(visionOS)
         inputAssistantItem.leadingBarButtonGroups = [] // no shortcut bar over the Mac's screen
         inputAssistantItem.trailingBarButtonGroups = []
+        #endif
     }
 
     private func applyMode() {
@@ -340,7 +342,9 @@ final class MacScreenUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         host.view.autoresizingMask = .flexibleWidth
         return host
     }()
+    #if !os(visionOS) // visionOS's keyboard takes no accessory row: the Mac's extra keys need a place of their own there
     override var inputAccessoryView: UIView? { softKeyboard ? keyRow.view : nil }
+    #endif
 
     /// A key of the row (esc, tab, an arrow), with the modifiers held for it.
     func typeSpecial(_ code: UInt16, _ chars: String) {

@@ -1,3 +1,4 @@
+#if !os(visionOS) // a Vision Pro's buttons are not readable; ios/Henge/Vision/VisionCompat.swift stands in
 import SwiftUI
 import UIKit
 import MediaPlayer
@@ -349,3 +350,4 @@ struct CaptureInteractionView: UIViewRepresentable {
         override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? { nil }
     }
 }
+#endif

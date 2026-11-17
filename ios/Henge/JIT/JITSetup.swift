@@ -187,12 +187,14 @@ final class JITCoordinator: ObservableObject {
         }
         // The helper reaches this device through LocalDevVPN. When it is not connected, connect it first: LocalDevVPN
         // connects and comes back (henge://), and the return to the foreground goes on above.
+        #if !os(visionOS) // there the tunnel is Henge's own, and enableBuiltIn starts it
         if LocalDevVPN.isInstalled, !LocalDevVPN.isConnected {
             log("JIT at launch: LocalDevVPN is not connected; opening it to connect")
             awaitingVPN = true
             LocalDevVPN.open()
             return
         }
+        #endif
         log("turning JIT on at launch with built-in StikJIT")
         method = .builtIn
         enable()
@@ -322,13 +324,14 @@ final class JITCoordinator: ObservableObject {
     /// Check LocalDevVPN and the Developer Disk Image, mounting it when needed. `attempt` counts tries; see JITRetryPolicy.
     func prepareBuiltIn(attempt: Int = 1) {
         guard let pairing = builtInPairing() else { return }
+        if startVisionTunnelFirst(then: { [weak self] in self?.prepareBuiltIn(attempt: attempt) }) { return }
         busy = true
         error = nil
         connectionProblem = nil
         advice = nil
         if attempt == 1 { status = "Checking LocalDevVPN and the Developer Disk Image…" }
         RemotePairingPortDiscovery.resolve { port in
-            HengeBuiltInJIT.send(.prepare(pairingData: pairing, rsdPort: port)) { [weak self] result in
+            HengeBuiltInJIT.send(.prepare(pairingData: pairing, rsdPort: port, deviceAddress: JITDeviceAddress.current)) { [weak self] result in
                 guard let self else { return }
                 switch result {
                 case .success(let response):
@@ -358,6 +361,7 @@ final class JITCoordinator: ObservableObject {
             error = "Henge's JIT script is missing from this installation. Reinstall Henge."
             return
         }
+        if startVisionTunnelFirst(then: { [weak self] in self?.enableBuiltIn(attempt: attempt) }) { return }
 
         busy = true
         JITBootstrap.helperMayBeAttached = true
@@ -388,7 +392,8 @@ final class JITCoordinator: ObservableObject {
 
         RemotePairingPortDiscovery.resolve { port in
             HengeBuiltInJIT.send(
-                .enable(targetPID: getpid(), pairingData: pairing, scriptBase64: script, rsdPort: port),
+                .enable(targetPID: getpid(), pairingData: pairing, scriptBase64: script, rsdPort: port,
+                        deviceAddress: JITDeviceAddress.current),
                 started: { [weak self] in
                     if attempt == 1 { self?.status = "Waiting for the helper to attach…" }
                     readiness = Self.waitForDebugger { attached in
@@ -419,6 +424,32 @@ final class JITCoordinator: ObservableObject {
                     }
                 })
         }
+    }
+
+    /// visionOS: the helper reaches this device through Henge's own loopback tunnel (VisionTunnel), started here the
+    /// first time it is needed. True when it is being started; `then` runs once it is up.
+    private func startVisionTunnelFirst(then: @escaping () -> Void) -> Bool {
+        #if os(visionOS)
+        guard JITDeviceAddress.current == nil, !LocalDevVPN.isConnected, !VisionTunnel.attempted else { return false }
+        busy = true
+        error = nil
+        status = "Starting Henge's loopback tunnel…"
+        log("starting the loopback tunnel")
+        VisionTunnel.start { [weak self] failure in
+            guard let self else { return }
+            busy = false
+            if let failure {
+                status = nil
+                error = failure
+                showSetup = true
+                return
+            }
+            then()
+        }
+        return true
+        #else
+        return false
+        #endif
     }
 
     func resetDDI() {
@@ -494,6 +525,38 @@ final class JITCoordinator: ObservableObject {
     }
 }
 
+/// Where the built-in helper looks for this device, when that is not StikJIT's default of 10.7.0.1 (LocalDevVPN's
+/// address for it). Set with the default `henge.jit.deviceAddress`: an IPv4 address, or `wifi` for this device's
+/// own address on Wi-Fi. For finding out whether a device can be reached without a VPN (the visionOS spike).
+enum JITDeviceAddress {
+    static let key = "henge.jit.deviceAddress"
+
+    static var current: String? {
+        guard let value = UserDefaults.standard.string(forKey: key), !value.isEmpty else { return nil }
+        guard value == "wifi" else { return value }
+        let address = wifiAddress
+        HengeLog.log("jit", "device address: this device on Wi-Fi, \(address ?? "no address found")")
+        return address
+    }
+
+    /// This device's IPv4 address on en0.
+    static var wifiAddress: String? {
+        var list: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&list) == 0, let first = list else { return nil }
+        defer { freeifaddrs(list) }
+        for p in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let ifa = p.pointee
+            guard (ifa.ifa_flags & UInt32(IFF_UP)) != 0, let sa = ifa.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET),
+                  String(cString: ifa.ifa_name) == "en0" else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 {
+                return String(cString: host)
+            }
+        }
+        return nil
+    }
+}
+
 /// LocalDevVPN, which Built-in StikJIT and StikDebug reach the device through:
 /// open it to connect when it is installed, otherwise its App Store page.
 enum LocalDevVPN {
@@ -501,7 +564,12 @@ enum LocalDevVPN {
     /// `enable` connects the VPN; `scheme` has LocalDevVPN return to Henge afterwards.
     static let connect = URL(string: "localdevvpn://enable?scheme=henge")!
 
+    #if os(visionOS)
+    /// On visionOS the tunnel is Henge's own (VisionTunnel), so it is there whenever the build has it.
+    static var isInstalled: Bool { VisionTunnel.isBundled }
+    #else
     static var isInstalled: Bool { UIApplication.shared.canOpenURL(URL(string: "localdevvpn://")!) }
+    #endif
 
     /// Whether its tunnel is up: a tunnel interface that is up with an address in 10.7.0.0/16 (LocalDevVPN's own is
     /// 10.7.1.1), the network it routes to reach this device at 10.7.0.1, StikJIT's default device address.
@@ -523,6 +591,12 @@ enum LocalDevVPN {
     static var actionTitle: String { isInstalled ? "Connect LocalDevVPN" : "Get LocalDevVPN" }
 
     @MainActor static func open() {
+        #if os(visionOS)
+        if VisionTunnel.isBundled {
+            VisionTunnel.start { _ in JITCoordinator.shared.objectWillChange.send() }
+            return
+        }
+        #endif
         let installed = isInstalled
         HengeLog.log("jit", "LocalDevVPN \(installed ? "connect" : "app-store")")
         UIApplication.shared.open(installed ? connect : appStore)

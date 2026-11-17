@@ -172,6 +172,11 @@ void hv_pvg_lite_set_mode(uint32_t width, uint32_t height) {
     display_h = height;
 }
 
+void hv_pvg_lite_mode_size(uint32_t *width, uint32_t *height) {
+    *width = display_w;
+    *height = display_h;
+}
+
 static void display_set_page(HvPvgLite *p, uint64_t pa) {
     uint8_t *d = hv_phys_ptr(p->m, pa, 0x4000);
     if (!d) return;
@@ -187,13 +192,29 @@ static void display_set_page(HvPvgLite *p, uint64_t pa) {
     PUT32(0x20, 3);
     PUTF(0x24, (float)width_mm);
     PUTF(0x28, (float)height_mm);
-    PUT32(0x208, 1); /* one mode: */
-    PUT32(0x210, display_h << 16 | display_w);
+    PUT32(0x210, display_h << 16 | display_w); /* the first mode: the one the Mac is started with */
+    uint32_t modes = 1;
     {   /* m4 fork: 120 Hz on ProMotion (HV_HZ), so WindowServer animates at the panel's rate */
         const char *hz = getenv("HV_HZ");
         uint32_t r = hz && atoi(hz) > 0 ? (uint32_t)atoi(hz) : 60;
         PUT32(0x214, r << 16);
+        /* visionOS spike: more modes (HV_DISPLAY_MODES, "2560x1080,3440x1440"), for macOS to list under Displays.
+           The table is taken to be {size, rate} pairs from +210: what follows it, the colour matrix at +a10, is
+           256 of them further on. Not seen in use before this; without the variable the page is as it was. */
+        const char *more = getenv("HV_DISPLAY_MODES");
+        while (more && *more && modes < 16) {
+            unsigned w = 0, h = 0;
+            int used = 0;
+            if (sscanf(more, "%ux%u%n", &w, &h, &used) < 2 || !used) break;
+            more += used;
+            if (*more == ',') more++;
+            if (w < 640 || h < 480 || w > 8192 || h > 8192 || (w == display_w && h == display_h)) continue;
+            PUT32(0x210 + 8 * modes, h << 16 | w);
+            PUT32(0x214 + 8 * modes, r << 16);
+            modes++;
+        }
     }
+    PUT32(0x208, modes);
     PUTF(0xa10, 1.0f); /* identity colour matrix */
     PUTF(0xa24, 1.0f);
     PUTF(0xa38, 1.0f);
@@ -410,6 +431,10 @@ uint64_t hv_pvg_lite_gpu_frames(HvPvgLite *p) {
 
 int hv_pvg_lite_snapshot(HvPvgLite *p, uint8_t *bgra, uint32_t width, uint32_t height) {
     return p && p->metal ? hv_pvg_metal_snapshot(p->metal, bgra, width, height) : -1;
+}
+
+int hv_pvg_lite_screen_size(HvPvgLite *p, uint32_t *width, uint32_t *height) {
+    return p && p->metal ? hv_pvg_metal_screen_size(p->metal, width, height) : -1;
 }
 
 int hv_pvg_lite_frame(HvPvgLite *p, const uint8_t **pixels, uint32_t *width, uint32_t *height) {

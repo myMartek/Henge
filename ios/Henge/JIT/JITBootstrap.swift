@@ -91,6 +91,9 @@ enum JITBootstrap {
     @discardableResult
     static func prewarm() -> Bool {
         if prewarmed { return true }
+        #if os(visionOS)
+        return prewarmVision()
+        #else
         // Before iOS 26 Henge can make the region itself where the device allows it (a jailbreak,
         // a debugger that attached and let go such as TrollStore's enable-jit, or dynamic-codesigning),
         // so it does not wait for CS_DEBUGGED there if jailbroken: Dopamine hides that flag from apps unless
@@ -153,7 +156,80 @@ enum JITBootstrap {
         HengeLog.log("jit", ok ? "JIT region secured; it will be handed to QEMU later"
                               : "JIT prewarm FAILED -- StikDebug is not servicing traps")
         return ok
+        #endif
     }
+
+    #if os(visionOS)
+    /// What the last try on visionOS was made with: it is repeated only once a debugger has attached since.
+    nonisolated(unsafe) static private var visionTriedDebugged: Bool?
+
+    /// How Henge may get its region under a debugger on a Vision Pro, from the environment it was launched with:
+    /// HENGE_JIT_SERVICER when the debugger answers Henge's brk (xros/lldb/henge_jit.py does, as StikDebug's
+    /// script does on iOS), HENGE_JIT_SELF to make the region itself although a debugger is attached.
+    private static let visionServicer = ProcessInfo.processInfo.environment["HENGE_JIT_SERVICER"] != nil
+    private static let visionSelf = ProcessInfo.processInfo.environment["HENGE_JIT_SELF"] != nil
+
+    /// visionOS. StikDebug and the built-in helper are iOS's, so the region comes from one of two places:
+    ///  - the process itself (henge_ios_jit_prewarm_self: MAP_JIT, then plain memory turned executable, each proven
+    ///    by running code in it). The simulator allows that as it is.
+    ///  - a debugger that answers Henge's brk and hands the memory out (henge_ios_jit_prewarm): lldb with
+    ///    xros/lldb/henge_jit.py, or the built-in StikJIT helper. Asked for only when one of them is known to be
+    ///    there (the launch says so, or Henge started the helper): a brk nobody answers stops the app for good.
+    /// Nothing is assumed from the model or the version; xros/README.md records what a Vision Pro was seen to do.
+    private static func prewarmVision() -> Bool {
+        let debugged = debuggedFlag
+        if let tried = visionTriedDebugged, tried || !debugged { return false }
+        visionTriedDebugged = debugged
+        selfGrantTried = true
+        #if !targetEnvironment(simulator)
+        // The built-in helper (StikJIT with henge-jit.js) answers the brk as lldb's script does.
+        if debugged && (visionServicer || helperMayBeAttached) {
+            HengeLog.log("jit", "visionOS: asking the debugger for the JIT region (\(visionServicer ? "HENGE_JIT_SERVICER" : "built-in helper"))")
+            if henge_ios_jit_prewarm(jitBytes) {
+                // Before the debugger goes: a page it did not write into would stop the app later, with nobody to say why.
+                let ran = henge_ios_jit_spot_check(64)
+                HengeLog.log("jit", "JIT region handed out by the debugger; generated code ran in \(ran) of 64 pages across it")
+                prewarmed = true
+                lastFailure = nil
+                detachIfDone()
+                return true
+            }
+            lastFailure = "The debugger answered, but the JIT region it gave did not work (the log's jit lines say why)."
+            HengeLog.log("jit", "visionOS: the debugger's JIT region FAILED")
+            return false
+        }
+        if debugged && !visionSelf {
+            // A call into memory this process made executable itself can fault, and under a debugger that fault is a
+            // stop nobody resumes: tried only when the launch asks for it.
+            lastFailure = "A debugger is attached, but nothing told Henge how to get executable memory from it. "
+                        + "Attach lldb with xros/lldb/henge_jit.py and launch with HENGE_JIT_SERVICER=1."
+            HengeLog.log("jit", "visionOS: debugger attached, neither HENGE_JIT_SERVICER nor HENGE_JIT_SELF set; not trying")
+            return false
+        }
+        if !debugged {
+            // Nothing works on a Vision Pro without a debugger (MAP_JIT is refused), and trying gives away the address
+            // space held low for the region: the debugger's 1.5 GB then lands where generated code does not run.
+            lastFailure = "Henge has no executable memory yet. On Apple Vision Pro it comes from a debugger: Henge's "
+                        + "built-in helper, or lldb on a Mac."
+            HengeLog.log("jit", "visionOS: no debugger attached; not trying, and keeping the address space for the JIT region")
+            return false
+        }
+        #endif
+        HengeLog.log("jit", "visionOS: making the JIT region without a trap servicer (debugger: \(debugged ? "attached" : "none"))")
+        if henge_ios_jit_prewarm_self(jitBytes) {
+            prewarmed = true
+            lastFailure = nil
+            HengeLog.log("jit", "JIT region made by Henge itself (\(henge_ios_jit_self_route().map { String(cString: $0) } ?? "self"))")
+            return true
+        }
+        lastFailure = debugged
+            ? "A debugger is attached, but visionOS did not let Henge make executable memory itself (the log's jit lines say "
+              + "which step was refused)."
+            : "Henge has no executable memory. On Apple Vision Pro it comes from a debugger: see xros/README.md."
+        HengeLog.log("jit", "visionOS: no JIT region (debugger: \(debugged ? "attached" : "none"))")
+        return false
+    }
+    #endif
 
     /// Whether to leave StikDebug attached after the region is held.
     ///
@@ -182,12 +258,16 @@ enum JITBootstrap {
     /// the region itself, which is all TrollStore and jailbroken devices need. Cheap after the first call, and logs nothing.
     static var ready: Bool {
         if prewarmed || isLive { return true }
+        #if os(visionOS)
+        return prewarm() // one try, and one more once a debugger attaches (prewarmVision)
+        #else
         // On a TXM device the debugger must also answer the brk that claims the region. CS_DEBUGGED alone is what opening
         // Henge from StikDebug's app list gives (no Henge script) or LiveContainer, and an install then stops at
         // "Henge has no JIT region" (#23).
         if debuggedFlag { return !deviceEnforcesTXM }
         guard canGrantOwnJIT, !selfGrantTried else { return false }
         return prewarm()
+        #endif
     }
 
     /// True once this process has told StikDebug to let go.
@@ -232,7 +312,12 @@ enum JITBootstrap {
     /// Whether this device enforces TXM, so that only a trap servicer can grant
     /// executable memory. Uses the same rule as the "TXM expected" line in the
     /// log banner, so the two can never disagree.
+    #if os(visionOS)
+    /// Not known for a Vision Pro (the iOS rule below would say yes to any model through `*`): prewarmVision measures it.
+    static let deviceEnforcesTXM = false
+    #else
     static let deviceEnforcesTXM: Bool = HengeLog.expectsTXM(model: HengeLog.deviceModel)
+    #endif
 
     /// Why the last prewarm failed, for the UI to show.
     ///
@@ -351,8 +436,12 @@ enum JITBootstrap {
     /// debugger to hand it out: true before iOS 26, which is when the Trusted Execution Monitor arrived. It is what makes
     /// TrollStore and jailbreaks enough, without StikDebug.
     static var canGrantOwnJIT: Bool {
+        #if os(visionOS)
+        return true // tried rather than ruled out: `#available(iOS 26, *)` is true on every visionOS
+        #else
         if #available(iOS 26, *) { return false }
         return true
+        #endif
     }
 
     /// henge-jit.js as standard base64, which Built-in StikJIT's custom script takes.

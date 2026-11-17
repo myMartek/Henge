@@ -52,6 +52,56 @@ struct MacSettingsView: View {
                 .padding(.vertical, 10)
                 .deskCard()
 
+                #if os(visionOS)
+                DeskHeading("Screen")
+                if mac.isWindows {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Picker("Screen", selection: Binding(get: {
+                            WindowsScreen.all.contains { $0.width == mac.screen.width && $0.height == mac.screen.height }
+                                ? "\(mac.screen.width)x\(mac.screen.height)" : "\(WindowsScreen.standard.width)x\(WindowsScreen.standard.height)"
+                        }, set: { tag in
+                            guard let choice = WindowsScreen.all.first(where: { "\($0.width)x\($0.height)" == tag }) else { return }
+                            mac.retina = false
+                            (mac.screenWidth, mac.screenHeight) = (choice.width, choice.height)
+                            save()
+                        })) {
+                            ForEach(WindowsScreen.all, id: \.title) { choice in
+                                Text(choice.title).tag("\(choice.width)x\(choice.height)")
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        Text("Windows draws its screen with the emulated processor: a bigger screen is slower and warmer. Changes apply the next time this PC starts.")
+                            .font(.system(size: 13)).foregroundStyle(Desk.dim)
+                    }
+                    .padding(17)
+                    .deskCard()
+                    WindowsServiceCard(pc: mac)
+                } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    Picker("Screen", selection: Binding(get: {
+                        VisionScreen.tag(width: mac.screen.width, height: mac.screen.height)
+                    }, set: { tag in
+                        guard let choice = VisionScreen.choice(tag) else { return }
+                        mac.retina = false
+                        (mac.screenWidth, mac.screenHeight) = (choice.width, choice.height)
+                        save()
+                    })) {
+                        ForEach(VisionScreen.all, id: \.tag) { choice in
+                            Text(choice.title).tag(choice.tag)
+                        }
+                        if VisionScreen.choice(VisionScreen.tag(width: mac.screen.width, height: mac.screen.height)) == nil {
+                            Text("\(mac.screen.width) × \(mac.screen.height)").tag(VisionScreen.tag(width: mac.screen.width, height: mac.screen.height))
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    Text("The window takes the shape of the Mac's screen. A bigger screen is more for the Mac to draw, so it runs slower. Changes apply the next time this Mac starts.")
+                        .font(.system(size: 13)).foregroundStyle(Desk.dim)
+                }
+                .padding(17)
+                .deskCard()
+                }
+                #endif
+
                 if Device.fittingScreen.height != 1080 {
                     DeskHeading("Screen")
                     VStack(alignment: .leading, spacing: 12) {

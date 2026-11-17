@@ -1,6 +1,8 @@
 # Light build: one clang call per file, no parallel jobs needed.
 CC = clang
-CFLAGS = -std=c11 -Wall -Wextra -O2 -g -Icore -Ihost -Idevices
+# ENGINE_DEFS: build-time engine settings for experiments, such as ENGINE_DEFS=-DHV_TLB_BITS=12 (core/cpu.h).
+ENGINE_DEFS ?=
+CFLAGS = -std=c11 -Wall -Wextra -O2 -g -Icore -Ihost -Idevices $(ENGINE_DEFS)
 B = build
 
 CORE = $(B)/classify.o $(B)/operands.o $(B)/translate.o $(B)/dispatch.o $(B)/mmu.o $(B)/memop.o \
@@ -130,9 +132,9 @@ IOS_SDK = $(shell xcrun --sdk iphoneos --show-sdk-path)
 IOS_CC = xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=17.0 -isysroot $(IOS_SDK)
 # ios/deps/include/slirp first when it holds libslirp's headers (they are all the engine takes from there).
 IOS_DEPS ?= $(if $(wildcard ios/deps/include/slirp/libslirp.h),$(CURDIR)/ios/deps,$(HOME)/Documents/Coding/Husk/build/ios-arm64/sysroot)
-IOS_CFLAGS = -std=c11 -Wall -Wextra -O2 -g -Icore -Ihost -Idevices -I$(IOS_DEPS)/include/slirp
+IOS_CFLAGS = -std=c11 -Wall -Wextra -O2 -g -Icore -Ihost -Idevices -I$(IOS_DEPS)/include/slirp $(ENGINE_DEFS)
 IB = build/ios
-IOS_SRC = $(wildcard core/*.c) host/prof_ios.c host/jit_region.c host/disk.c host/vm.c host/snapshot.c host/net_slirp.c host/dns_proxy.c host/share.c host/audio_mac.c host/hvsparse.c host/usb_host.c \
+IOS_SRC = $(wildcard core/*.c) host/prof_ios.c host/fault_bench.c host/jit_region.c host/disk.c host/vm.c host/snapshot.c host/net_slirp.c host/dns_proxy.c host/share.c host/audio_mac.c host/hvsparse.c host/usb_host.c \
           $(filter-out devices/pvg_mac.m,$(wildcard devices/*.c))
 IOS_OBJ = $(patsubst %.c,$(IB)/%.o,$(IOS_SRC)) $(IB)/host/enter.o $(IB)/devices/pvg_metal.o
 
@@ -170,6 +172,12 @@ $(IB)/libhengetl.a: $(TL_IOS_OBJ) $(TL_SHIM_IOS_OBJ) $(IB)/tl/shim/hk_symbols.o
 	xcrun --sdk iphoneos libtool -static -o $@ $(TL_IOS_OBJ) $(TL_SHIM_IOS_OBJ) $(IB)/tl/shim/hk_symbols.o
 ios-lib: $(IB)/libhengevm.a $(IB)/libhengetl.a
 .PHONY: ios-lib
+
+# ENGINE_DEFS can change the HvCpu layout, so every engine object is rebuilt when it changes: mixing objects
+# built under two settings links without complaint and breaks at run time.
+DEFS_STAMP = $(B)/engine-defs.stamp
+$(shell mkdir -p $(B); [ -f $(DEFS_STAMP) ] && [ "$$(cat $(DEFS_STAMP))" = "$(ENGINE_DEFS)" ] || printf '%s' "$(ENGINE_DEFS)" > $(DEFS_STAMP))
+$(ENGINE) $(DEV) $(IOS_OBJ): $(DEFS_STAMP)
 
 # The app's glue to it (ios/Henge/Native/henge-tl.c) on the Mac: import a disk image, describe what it holds, run a program.
 $(B)/test_tl_glue: tests/test_tl_glue.c ios/Henge/Native/henge-tl.c $(TL_SRC) host/jit_region.c | $(B)
@@ -264,3 +272,50 @@ $(B)/test_jit_advice: ios/Henge/JIT/JITNetworkAdvice.swift tests/test_jit_advice
 test-jit-advice: $(B)/test_jit_advice
 	$(B)/test_jit_advice
 .PHONY: test-jit-advice
+
+# ---- visionOS: the engine as a static library for the visionOS app (xros/) ----
+# make xros-lib                         -> build/xros/libhengevm.a          (Apple Vision Pro)
+# make xros-lib XR_PLATFORM=xrsimulator -> build/xrsimulator/libhengevm.a   (its simulator)
+# Networking links libslirp and glib from xros/deps/<platform> (xros/scripts/build_deps_xros.sh makes them).
+XR_PLATFORM ?= xros
+XR_MINVER ?= 2.0
+XR_TRIPLE = arm64-apple-xros$(XR_MINVER)$(if $(filter xrsimulator,$(XR_PLATFORM)),-simulator)
+XR_SDK = $(shell xcrun --sdk $(XR_PLATFORM) --show-sdk-path)
+XR_CC = xcrun --sdk $(XR_PLATFORM) clang -target $(XR_TRIPLE) -isysroot $(XR_SDK)
+XR_DEPS ?= $(CURDIR)/xros/deps/$(XR_PLATFORM)
+XR_CFLAGS = -std=c11 -Wall -Wextra -O2 -g -Icore -Ihost -Idevices -I$(XR_DEPS)/include/slirp $(ENGINE_DEFS)
+XB = build/$(XR_PLATFORM)
+XR_OBJ = $(patsubst %.c,$(XB)/%.o,$(IOS_SRC)) $(XB)/host/enter.o $(XB)/devices/pvg_metal.o
+
+$(XB)/core/mmu.o: core/mmu.c core/*.h host/*.h devices/*.h
+	@mkdir -p $(dir $@)
+	$(XR_CC) $(XR_CFLAGS) -mgeneral-regs-only -c $< -o $@
+$(XB)/%.o: %.c core/*.h host/*.h devices/*.h
+	@mkdir -p $(dir $@)
+	$(XR_CC) $(XR_CFLAGS) -c $< -o $@
+$(XB)/devices/pvg_metal.o: devices/pvg_metal.m devices/*.h core/*.h host/*.h
+	@mkdir -p $(dir $@)
+	$(XR_CC) $(XR_CFLAGS) -fobjc-arc -Wno-unused-parameter -Wno-deprecated-declarations -c $< -o $@
+$(XB)/host/enter.o: host/enter.S
+	@mkdir -p $(dir $@)
+	$(XR_CC) -c $< -o $@
+$(XR_OBJ): $(DEFS_STAMP)
+$(XB)/libhengevm.a: $(XR_OBJ)
+	rm -f $@
+	xcrun --sdk $(XR_PLATFORM) libtool -static -o $@ $(XR_OBJ)
+# The translation layer (tl/) and Henge's AppKit, as for iOS.
+TL_XR_OBJ = $(patsubst %,$(XB)/%.o,$(TL_SRC))
+TL_SHIM_XR_OBJ = $(patsubst %,$(XB)/%.o,$(TL_SHIM))
+$(XB)/tl/%.o: tl/% tl/loader/*.h tl/dmg/*.h tl/shim/appkit/*.h
+	@mkdir -p $(dir $@)
+	$(XR_CC) -O2 -g -Wall -Wno-unused-parameter -fblocks $(if $(filter %.m,$<),-fobjc-arc) -c $< -o $@
+$(XB)/tl/shim/hk_symbols.c: $(TL_SHIM_XR_OBJ) tl/shim/tools/hk_symbols.sh
+	@mkdir -p $(dir $@)
+	tl/shim/tools/hk_symbols.sh $@ $(TL_SHIM_XR_OBJ)
+$(XB)/tl/shim/hk_symbols.o: $(XB)/tl/shim/hk_symbols.c
+	$(XR_CC) -c $< -o $@
+$(XB)/libhengetl.a: $(TL_XR_OBJ) $(TL_SHIM_XR_OBJ) $(XB)/tl/shim/hk_symbols.o
+	rm -f $@
+	xcrun --sdk $(XR_PLATFORM) libtool -static -o $@ $(TL_XR_OBJ) $(TL_SHIM_XR_OBJ) $(XB)/tl/shim/hk_symbols.o
+xros-lib: $(XB)/libhengevm.a $(XB)/libhengetl.a
+.PHONY: xros-lib

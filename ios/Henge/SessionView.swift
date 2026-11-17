@@ -28,9 +28,13 @@ struct SessionView: View {
     @AppStorage("henge.cursor.sharp") private var sharpCursor = true
     @AppStorage(HardwareMouse.scrollSpeedKey) private var scrollSpeed = 0.3
 
-    @State private var typing = false
+    /// Testing: -henge.session.typing YES opens a session with the keyboard asked for.
+    @State private var typing = UserDefaults.standard.bool(forKey: "henge.session.typing")
     @State private var zoomed = false
     @State private var showDetails = false
+    /// The Mac's screen as it is now, once it shows one: it can pick another resolution than it was started with,
+    /// and of another shape. The view takes that shape, so that a click lands where it is made.
+    @State private var guestScreen: CGSize?
     @State private var controlsHidden = false
     @State private var showRevealHint = false
     @State private var pointerRefused = false
@@ -42,12 +46,20 @@ struct SessionView: View {
     @AppStorage("henge.tips.stillWallpaperShown") private var stillWallpaperTipShown = false
     @State private var showWallpaperTip = false
     @State private var confirmStop = false
+    /// This run was a Windows installation and ended the way one ends: Windows shut itself down.
+    @State private var windowsInstalled = false
+    @State private var windowsServicing = false
+    /// What is being got ready before the machine starts, to say so meanwhile.
+    @State private var preparing: String?
     @State private var zoomCentre = CGPoint(x: 0.5, y: 0.5) // where the zoomed view is, 0...1 of the Mac's screen
     @State private var map: UIImage?
     @State private var zoomFollowing: Task<Void, Never>?
     @State private var helperRunning = false
     @State private var shown = CGSize(width: 0.5, height: 0.5) // how much of the Mac's screen the zoomed view shows
     @Environment(\.scenePhase) private var scenePhase
+    #if os(visionOS)
+    @Environment(\.openWindow) private var openWindow
+    #endif
 
 
     var body: some View {
@@ -56,7 +68,7 @@ struct SessionView: View {
             let full = CGSize(width: geo.size.width + insets.leading + insets.trailing,
                               height: geo.size.height + insets.top + insets.bottom)
             let landscape = full.width > full.height
-            let layout = Layout(full: full, insets: insets, landscape: landscape, zoomed: zoomed, typing: typing, centre: zoomCentre, aspect: mac.aspect)
+            let layout = Layout(full: full, insets: insets, landscape: landscape, zoomed: zoomed, typing: Self.keyboardTakesRoom && typing, centre: zoomCentre, aspect: screenAspect)
             ZStack(alignment: .topLeading) {
                 (landscape || zoomed ? Color.black : Desk.page)
                 // One view in every layout: it holds the layer the engine draws into.
@@ -85,7 +97,9 @@ struct SessionView: View {
                     }
                     .position(x: layout.screen.midX, y: layout.screen.midY)
                 if state != 2 {
-                    Trackpad()
+                    Trackpad(macRect: layout.screen.offsetBy(dx: -layout.touch.minX, dy: -layout.touch.minY),
+                             macPixels: guestScreen ?? CGSize(width: mac.screen.width, height: mac.screen.height),
+                             windowAspect: Self.windowFollowsMac ? screenAspect : 0)
                         .frame(width: layout.touch.width, height: layout.touch.height)
                         .position(x: layout.touch.midX, y: layout.touch.midY)
                     if inputMode == .volumeButtons && volumeMode == .intercept {
@@ -135,11 +149,22 @@ struct SessionView: View {
                 }
                 if state == 2 {
                     StoppedMacView(outcome: henge_vm_exit_outcome(), reason: String(cString: henge_vm_exit_reason()),
-                                   start: { bootAttempt += 1 }, close: close)
+                                   start: { bootAttempt += 1 }, windows: mac.kind == "windows", installed: windowsInstalled, close: close)
                         .frame(width: min(layout.touch.width - 32, 360))
                         .position(x: layout.touch.midX, y: layout.fillsPhone ? layout.touch.midY : layout.pad.midY)
                 }
                 if let error { errorCard(error, layout) }
+                if let preparing {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text(preparing).font(.subheadline).multilineTextAlignment(.center)
+                    }
+                    .foregroundStyle(.white)
+                    .padding(24)
+                    .frame(maxWidth: 380)
+                    .background(Color(white: 0.10), in: RoundedRectangle(cornerRadius: 22))
+                    .position(x: layout.touch.midX, y: layout.fillsPhone ? layout.touch.midY : layout.pad.midY)
+                }
                 KeyboardCatcher(active: $typing).frame(width: 0, height: 0)
             }
             .frame(width: full.width, height: full.height)
@@ -164,11 +189,33 @@ struct SessionView: View {
         }
         .statusBarHidden(zoomed || Device.isPad)
         .persistentSystemOverlays(.hidden)
-        .sheet(isPresented: $showDetails) { details }
+        #if os(visionOS)
+        // The controls sit under the window, not over the Mac's screen: nothing of the Mac is covered, so nothing needs
+        // hiding, and the four-finger tap that brings hidden controls back on a touchscreen does not exist here.
+        .ornament(visibility: state != 2 ? .visible : .hidden, attachmentAnchor: .scene(.bottom), contentAlignment: .top) {
+            VStack(spacing: 10) {
+                visionBar
+                if typing {
+                    // The Mac's own keys, which visionOS's keyboard lacks and has no row above it for.
+                    VisionKeyRow()
+                        .padding(10)
+                        .glassBackgroundEffect(in: Capsule())
+                        .transition(.opacity)
+                }
+            }
+            .padding(.top, 14)
+            .animation(.easeInOut(duration: 0.2), value: typing)
+        }
+        #endif
+        .sheet(isPresented: $showDetails) { details.deskPlainButtons() }
         .confirmationDialog("Shut down \(mac.name)?", isPresented: $confirmStop, titleVisibility: .visible) {
-            Button("Shut Down", role: .destructive) { finish() }
+            #if os(visionOS)
+            if mac.isWindows { Button("Ask Windows to shut down") { henge_vm_power_button() } } // its power button, not the plug
+            #endif
+            Button(mac.kind == "windows" ? "Turn off now" : "Shut Down", role: .destructive) { finish() }
         } message: {
-            Text("This turns the Mac off at once. Anything not saved on it is lost.")
+            Text(mac.kind == "windows" ? "Turning it off at once loses anything not saved, and stops an installation half way."
+                                       : "This turns the Mac off at once. Anything not saved on it is lost.")
         }
         .onChange(of: zoomed) { on in
             zoomFollowing?.cancel()
@@ -194,11 +241,13 @@ struct SessionView: View {
             if showing { HardwareKeys.releaseAll(); StickyKeys.shared.releaseAll() }
         }
         .onAppear {
+            RunningMac.shown += 1
             UIApplication.shared.isIdleTimerDisabled = true
             HardwareMouse.shared.start()
             VolumeClicks.shared.start()
         }
         .onDisappear {
+            RunningMac.shown = max(RunningMac.shown - 1, 0)
             UIApplication.shared.isIdleTimerDisabled = false
             zoomFollowing?.cancel()
             StickyKeys.shared.releaseAll()
@@ -209,6 +258,32 @@ struct SessionView: View {
         .modifier(ExternalMacDisplayModifier(presentation: MacPresentation(display: display, aspect: mac.aspect)))
         .task(id: bootAttempt) { await run() }
         .task { await Sharing.followMacClipboard() }
+    }
+
+    /// The shape of the Mac's screen: as it is now, or as it was asked for until it shows one.
+    private var screenAspect: CGFloat {
+        if let guestScreen, guestScreen.height > 0 { return guestScreen.width / guestScreen.height }
+        return mac.aspect
+    }
+
+    /// Whether the window takes the shape of the Mac's screen. On visionOS, where a window is just that; an iPhone's
+    /// or iPad's screen has the shape it has.
+    private static var windowFollowsMac: Bool {
+        #if os(visionOS)
+        true
+        #else
+        false
+        #endif
+    }
+
+    /// Whether the Mac's screen makes room when the keyboard opens: under an iPhone's or iPad's keyboard, which covers
+    /// the screen. visionOS's floats in the room and covers nothing, so the Mac stays as it is.
+    private static var keyboardTakesRoom: Bool {
+        #if os(visionOS)
+        false
+        #else
+        true
+        #endif
     }
 
     /// When there is something of the app's to point at, iPadOS gets its own pointer back.
@@ -286,6 +361,7 @@ struct SessionView: View {
     // MARK: Upright
 
     @ViewBuilder private func uprightControls(_ layout: Layout) -> some View {
+        #if !os(visionOS) // there the controls are an ornament under the window (visionBar)
         if !typing && !controlsHidden {
             HStack {
                 tool("eye.slash", "Hide controls") { hideControls() }
@@ -307,6 +383,7 @@ struct SessionView: View {
             .position(x: layout.pad.midX, y: layout.toolsY + 27)
             .transition(.opacity)
         }
+        #endif
         trackpadPanel(layout)
     }
 
@@ -381,6 +458,7 @@ struct SessionView: View {
     // MARK: Filling the phone
 
     @ViewBuilder private func floatingControls(_ layout: Layout) -> some View {
+        #if !os(visionOS) // there the controls are an ornament under the window (visionBar)
         let landscape = layout.touch.width > layout.touch.height
         let top = layout.insets.top + (landscape ? 8 : 6)
         let pill = HStack(spacing: 4) {
@@ -404,8 +482,31 @@ struct SessionView: View {
         } else {
             pill.position(x: layout.touch.midX, y: layout.touch.height - layout.insets.bottom - 34)
         }
+        #endif
         if zoomed { zoomMap(layout) }
     }
+
+    #if os(visionOS)
+    /// The session's controls on visionOS, as an ornament under the window: keyboard, paste, zoom, details, shut down.
+    private var visionBar: some View {
+        HStack(spacing: 10) {
+            // The rest of Henge (the Macs, a download in the Install tab, Settings) in a window of its own, beside this one.
+            tool("macwindow.badge.plus", "Open a Henge window", tint: .white) { openWindow(id: RootView.windowID) }
+            Rectangle().fill(Color.white.opacity(0.3)).frame(width: 1, height: 24).padding(.horizontal, 4)
+            tool("keyboard", "Keyboard", tint: typing ? Desk.accentLight : .white) { typing.toggle() }
+            pasteTool
+            tool(zoomed ? "minus.magnifyingglass" : "plus.magnifyingglass", zoomed ? "Zoom out" : "Zoom in",
+                 tint: zoomed ? Desk.accentLight : .white) { zoomed.toggle() }
+            tool("info.circle", "Details", tint: .white) { showDetails = true }
+            Rectangle().fill(Color.white.opacity(0.3)).frame(width: 1, height: 24).padding(.horizontal, 4)
+            tool("power", "Shut down", tint: Desk.bad) { stopTapped() }
+        }
+        .buttonStyle(.borderless)
+        .padding(.horizontal, 16)
+        .frame(height: 64)
+        .glassBackgroundEffect(in: Capsule())
+    }
+    #endif
 
     /// The whole screen, small, with where the zoomed view is on it.
     private func zoomMap(_ layout: Layout) -> some View {
@@ -553,6 +654,12 @@ struct SessionView: View {
             }
             .navigationTitle("Details")
             .navigationBarTitleDisplayMode(.inline)
+            #if os(visionOS)
+            // A sheet is swiped away on iOS. visionOS has no such gesture: without a button it stays for good.
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { showDetails = false } }
+            }
+            #endif
         }
     }
 
@@ -586,6 +693,20 @@ struct SessionView: View {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
         guard !Task.isCancelled else { return }
+        guestScreen = nil
+        #if os(visionOS)
+        VisionPointer.shared.started = CGSize(width: mac.screen.width, height: mac.screen.height)
+        #endif
+        if let now = RunningMac.current, now.mac.id == mac.id, henge_vm_state() == 1 || henge_vm_state() == 4 {
+            // This Mac is running: its view went away over it. visionOS takes a window's scene while the headset is
+            // off and gives a new one back, which opens on the list of Macs; starting the Mac from there said "the
+            // previous Mac is still running" over the Mac itself, which could be seen and used behind the message.
+            HengeLog.log("session", "this Mac is running already: showing it again")
+            UIApplication.shared.isIdleTimerDisabled = true
+            HardwareMouse.shared.start()
+            bootRAM = now.ram
+            started = now.started
+        } else {
         UIApplication.shared.isIdleTimerDisabled = true
         HardwareMouse.shared.start()
         let ram = GuestMemory.prepare(mac)
@@ -606,7 +727,40 @@ struct SessionView: View {
         }
         HengeLog.log("session", "screen \(mac.screen.width)x\(mac.screen.height) retina \(mac.isRetina)")
         var rc: Int32 = -1
-        if InstantResume.enabled, let at = InstantResume.saved(for: mac, ramMB: ram, cpus: cpus) {
+        #if os(visionOS)
+        if mac.isWindows {
+            // A PC: firmware, its variables and the disk, and the installer disk for as long as it is there.
+            if mac.winNeedsService {
+                // A Windows from before the network driver: it is brought up to date on the way, in this same run.
+                HengeLog.log("session", "this Windows is at level \(mac.winLevel): servicing it first")
+                preparing = "Preparing an update for this Windows (network, screen, speed)…"
+                let lean = UserDefaults.standard.bool(forKey: "henge.windows.lean")
+                if let problem = await WindowsSetup.shared.buildService(mac, lean: lean, step: { preparing = "Updating this Windows: \($0)" }) {
+                    HengeLog.log("session", "no service disk (\(problem)): starting Windows as it is")
+                }
+                preparing = nil
+            }
+            let installer = mac.winInstalling ? mac.winInstaller.path : nil
+            HengeLog.log("session", "Windows PC\(installer == nil ? "" : ", installing")")
+            WindowsFirmware.prepare(mac)
+            var vars = mac.winVars.path
+            let servicing = mac.winServicing
+            if servicing, WindowsFirmware.unpack("edk2-arm-vars.fd", to: mac.winServiceVars) {
+                vars = mac.winServiceVars.path // the PC's own name Windows first; the service disk has to start
+                let screen = WindowsScreen.all.first { $0.width == mac.screen.width && $0.height == mac.screen.height }
+                _ = henge_win_set_screen(vars, UInt32(screen?.width ?? WindowsScreen.standard.width), UInt32(screen?.height ?? WindowsScreen.standard.height))
+                HengeLog.log("session", "a service run: the setup disk first")
+            }
+            windowsServicing = servicing
+            rc = henge_vm_boot_windows(mac.winCode.path, vars, mac.winDisk.path, installer, servicing ? 1 : 0, nil, nil, ram, Int32(cpus),
+                                       &buffer, buffer.count)
+            if rc != 0 {
+                error = String(cString: buffer)
+                return
+            }
+        }
+        #endif
+        if rc != 0, InstantResume.enabled, let at = InstantResume.saved(for: mac, ramMB: ram, cpus: cpus) {
             HengeLog.log("resume", "picking up the Mac saved \(Int(Date().timeIntervalSince(at))) s ago")
             let t0 = Date()
             rc = henge_vm_resume(mac.rom.path, mac.disk.path, mac.aux.path, mac.ecid, mac.seed, ram, Int32(cpus),
@@ -631,6 +785,8 @@ struct SessionView: View {
         var used = mac
         used.lastUsed = started
         Machines.shared.update(used)
+        RunningMac.current = (mac, started, ram)
+        }
         var lastBlocks = henge_vm_blocks()
         var lastTime = Date()
         var lastGPUFrames = henge_vm_gpu_frames()
@@ -642,6 +798,14 @@ struct SessionView: View {
                 continue
             }
             cpusOn = henge_vm_cpus_on()
+            var screenW: Int32 = 0, screenH: Int32 = 0
+            if henge_vm_display_size(&screenW, &screenH) == 0, screenW > 0, screenH > 0 {
+                let now = CGSize(width: Int(screenW), height: Int(screenH))
+                if now != guestScreen {
+                    HengeLog.log("session", "the Mac's screen is \(screenW) x \(screenH)")
+                    guestScreen = now
+                }
+            }
             userCode = userCode || henge_vm_guest_el0() != 0
             let now = Date(), blocks = henge_vm_blocks()
             blocksPerSecond = Double(blocks &- lastBlocks) / max(now.timeIntervalSince(lastTime), 0.001)
@@ -657,6 +821,7 @@ struct SessionView: View {
                 HengeLog.log("session", "thermal state: \(Self.thermalLabel(heat))")
             }
             if state == 2 {
+                RunningMac.current = nil
                 typing = false
                 showDetails = false
                 confirmStop = false
@@ -666,6 +831,24 @@ struct SessionView: View {
                 HardwareMouse.shared.stop()
                 UIApplication.shared.isIdleTimerDisabled = false
                 HengeLog.log("session", "showing stopped Mac: \(String(cString: henge_vm_exit_reason()))")
+                #if os(visionOS)
+                if windowsServicing, mac.winInstalling, henge_vm_restarts() >= 1 {
+                    // The service disk did its work and restarted into Windows; however that Windows was left, it is done.
+                    try? FileManager.default.removeItem(at: mac.winInstaller)
+                    try? FileManager.default.removeItem(at: mac.winServiceMark)
+                    try? FileManager.default.removeItem(at: mac.winServiceVars)
+                    mac.winMarkCurrent()
+                    HengeLog.log("windows", "the service run is finished: this Windows is at level \(WindowsSetup.level)")
+                } else if mac.winInstalling, henge_vm_exit_outcome() == Int32(HENGE_VM_OUTCOME_SHUTDOWN.rawValue) {
+                    // Windows shut itself down: that is the last step of its answer file. The installer disk has done its work.
+                    try? FileManager.default.removeItem(at: mac.winInstaller)
+                    try? FileManager.default.removeItem(at: mac.winServiceMark)
+                    try? FileManager.default.removeItem(at: mac.winServiceVars)
+                    windowsInstalled = !windowsServicing
+                    mac.winMarkCurrent()
+                    HengeLog.log("windows", "the installation is finished: the installer disk is removed")
+                }
+                #endif
                 if henge_vm_exit_outcome() == Int32(HENGE_VM_OUTCOME_RESTART.rawValue) && henge_vm_can_start() != 0 {
                     bootAttempt += 1
                 }
@@ -702,5 +885,19 @@ struct SessionView: View {
         }
         InstantResume.discard(for: mac) /* turned off: nothing to pick up */
         close()
+    }
+}
+
+/// The Mac the engine runs, for a view that has to find it again: on visionOS a window's scene can go away under a
+/// running Mac (the headset taken off) and a new one open on the list of Macs.
+@MainActor enum RunningMac {
+    static var current: (mac: VirtualMac, started: Date, ram: UInt64)?
+    /// Session views on screen now.
+    static var shown = 0
+
+    /// The Mac that is running with no view showing it.
+    static var unshown: VirtualMac? {
+        guard shown == 0, let current, henge_vm_state() == 1 || henge_vm_state() == 4 else { return nil }
+        return current.mac
     }
 }

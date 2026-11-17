@@ -154,6 +154,7 @@ private struct GPUScreen: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> Screen {
+        #if !os(visionOS) // no screen to describe there
         if ProcessInfo.processInfo.environment["HV_COLOR_PROBE"] != nil {
             // What the screen itself is, for the colour probe (the engine logs the layer and the frames).
             let s = UIScreen.main
@@ -162,6 +163,7 @@ private struct GPUScreen: UIViewRepresentable {
                        + "bounds=\(Int(s.bounds.width))x\(Int(s.bounds.height)) maxEDR=\(s.potentialEDRHeadroom) currentEDR=\(s.currentEDRHeadroom) "
                        + "brightness=\(String(format: "%.2f", s.brightness)) refreshHz=\(s.maximumFramesPerSecond)")
         }
+        #endif
         let view = Screen(display: display, role: role, surface: surface)
         setColorSpace(view)
         return view

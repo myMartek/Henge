@@ -372,14 +372,20 @@ static const char *volatile g_self_route;
 const char *henge_ios_jit_self_route(void) { return g_self_route; }
 
 static void henge_ios_jit_release_low_hold(size_t bytes);
+#if TARGET_OS_VISION && !TARGET_OS_SIMULATOR
+static void *henge_ios_jit_low_hint(void);
+static bool henge_ios_jit_is_low(const void *p, size_t bytes);
+#endif
 
 static HengeDualMapping henge_self_dual_mapping(size_t bytes)
 {
     HengeDualMapping none = { NULL, NULL, 0 };
+#if !TARGET_OS_VISION /* visionOS answers yes to `iOS 26, *` at any version, and what a Vision Pro enforces is not known: tried below */
     if (__builtin_available(iOS 26.0, *)) {
         HENGE_LOG("self: iOS 26 enforces TXM; only a debugger can grant executable memory here");
         return none;
     }
+#endif
     size_t size = (bytes + 0x3fff) & ~(size_t)0x3fff;
     /* No debugger will take the reserved block on this route, and it would keep this mapping out of the low window. */
     henge_ios_jit_release_low_hold(size);
@@ -405,11 +411,27 @@ static HengeDualMapping henge_self_dual_mapping(size_t bytes)
     /* 2. Plain memory made executable: only where invalid pages are known to be allowed. */
     bool debugged = henge_kernel_debugged();
     bool jailbroken = access("/var/jb", F_OK) == 0;
+#if TARGET_OS_SIMULATOR
+    debugged = true; /* a simulator's process runs on the Mac's kernel, which lets it execute what it wrote */
+#endif
     if (!debugged && !jailbroken) {
         HENGE_LOG("self: not marked as debugged and not jailbroken; nothing else is safe to try");
         return none;
     }
+#if TARGET_OS_VISION && !TARGET_OS_SIMULATOR
+    /* A Vision Pro put this reservation at 0x7000000000, where generated code does not run (HENGE_JIT_LOW_LIMIT): the call
+       faulted with a code-signing error and, with a debugger attached, stopped the app for good. So ask for the block
+       just released, and do not call into a region that still came back high. */
+    uint8_t *base = mmap(henge_ios_jit_low_hint(), size * 2, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (base != MAP_FAILED && !henge_ios_jit_is_low(base, size * 2)) {
+        HENGE_LOG("self: %zu MiB came back at %p, too high for generated code to run; a smaller code cache may fit below",
+                  (size * 2) >> 20, (void *)base);
+        munmap(base, size * 2);
+        return none;
+    }
+#else
     uint8_t *base = mmap(NULL, size * 2, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+#endif
     if (base == MAP_FAILED) {
         HENGE_LOG("self: could not reserve %zu MiB: %s", (size * 2) >> 20, strerror(errno));
         return none;
@@ -485,6 +507,20 @@ static void henge_ios_jit_release_low_hold(size_t bytes)
     g_jit_reserve_released = true;
 }
 
+#if TARGET_OS_VISION && !TARGET_OS_SIMULATOR
+/* Where the released block was: a hint for a region this process maps itself. NULL while the block is still held. */
+static void *henge_ios_jit_low_hint(void)
+{
+    if (!g_jit_reserve_released) return NULL;
+    return (void *)(((vm_address_t)g_jit_reserve + 16383) & ~(vm_address_t)16383);
+}
+
+static bool henge_ios_jit_is_low(const void *p, size_t bytes)
+{
+    return (uint64_t)(uintptr_t)p + bytes <= HENGE_JIT_LOW_LIMIT;
+}
+#endif
+
 /* The address space, for working out where a JIT region can go: every mapping, and the gaps of 256 MiB or more. */
 static void henge_ios_jit_log_map(const char *tag)
 {
@@ -556,6 +592,18 @@ static void henge_ios_release_high_hold(void)
         }
 }
 
+/* Gives the held blocks back, unless a Mac app has them. For a virtual Mac on visionOS: without extended virtual
+   addressing an app there has these 64 GB and little else (below them, the app itself up to 0x180000000, then the
+   shared cache and a guard up to 0x7000000000), so with 60 GB of them held for Mac apps the largest free piece was
+   4 GB and a Mac's RAM did not fit ("Cannot build the machine", Vision Pro M5, visionOS 27.3). */
+HENGE_EXPORT void henge_ios_jit_release_high_room(void)
+{
+    if (g_high_hold_given) return;
+    bool held = g_high_hold[0] || g_high_hold[1] || g_high_hold[2];
+    henge_ios_release_high_hold();
+    if (held) HENGE_LOG("high hold released: the room is the virtual Mac's");
+}
+
 /* The held blocks, once, for the translation layer to place large reservations in (they stay held: those are mapped
    over them). Returns how many (0 if none). */
 HENGE_EXPORT int henge_ios_take_high_room(void **base, size_t *bytes)
@@ -601,6 +649,34 @@ HENGE_EXPORT bool henge_ios_jit_prewarm_self(size_t bytes)
     henge_prewarm_done = true;
     fprintf(stderr, "[henge-jit] prewarm (self, %s) OK: %zu bytes\n", g_self_route ? g_self_route : "?", m.size);
     return true;
+}
+
+/*
+ * Runs a two-instruction function at the start of `count` pages spread evenly over the held region, first to last, and
+ * says how many ran. A debugger has to write into every page before it executes (xros/lldb/henge_jit.py), and the
+ * self-test above proves the first page only. Call it while the debugger is still attached: a page that was missed
+ * then shows there as a stop at its address instead of ending the app.
+ */
+HENGE_EXPORT int henge_ios_jit_spot_check(int count)
+{
+    if (!henge_prewarmed.rw_addr || count < 1) return -1;
+    size_t pages = henge_prewarmed.size / 0x4000;
+    int ran = 0;
+    for (int i = 0; i < count; i++) {
+        size_t page = count > 1 ? (pages - 1) * (size_t)i / (size_t)(count - 1) : 0;
+        uint32_t *rw = (uint32_t *)(void *)(henge_prewarmed.rw_addr + page * 0x4000);
+        uint8_t *rx = henge_prewarmed.rx_addr + page * 0x4000;
+        uint32_t saved[2] = { rw[0], rw[1] };
+        rw[0] = 0x52800000u | ((uint32_t)(i + 1) << 5); /* movz w0, #(i + 1) */
+        rw[1] = 0xD65F03C0u;                             /* ret */
+        sys_icache_invalidate(rx, 8);
+        if (((int (*)(void))(void *)rx)() == i + 1) ran++;
+        rw[0] = saved[0];
+        rw[1] = saved[1];
+        sys_icache_invalidate(rx, 8);
+    }
+    HENGE_LOG("spot check: %d of %d pages across the %zu MiB region ran generated code", ran, count, henge_prewarmed.size >> 20);
+    return ran;
 }
 
 /* The held region, for the native runtime (translation-layer/henge-tl-load.c looks this up by name). */
@@ -999,8 +1075,10 @@ HengeDualMapping henge_ios_jit_allocate(size_t bytes)
     return henge_ios_jit_allocate_real(bytes);
 }
 int henge_ios_take_high_room(void **base, size_t *bytes) { (void)base, (void)bytes; return 0; }
+void henge_ios_jit_release_high_room(void) {}
 bool henge_ios_jit_prewarm(size_t bytes) { (void)bytes; return false; }
 bool henge_ios_jit_prewarm_self(size_t bytes) { (void)bytes; return false; }
+int henge_ios_jit_spot_check(int count) { (void)count; return -1; }
 bool henge_ios_jit_reserve_bottom(size_t end) { (void)end; return true; }
 void henge_ios_jit_release(HengeDualMapping *m) { (void)m; }
 void henge_ios_jit_detach(void) {}

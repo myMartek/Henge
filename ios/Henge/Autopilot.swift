@@ -77,6 +77,45 @@ enum Autopilot {
                 return
             }
             start(mac)
+        #if os(visionOS)
+        case "windows": // "windows de-de [Professional]": Microsoft's image for that language onto a new PC, and the PC started
+            for _ in 0..<240 where !JITBootstrap.ready { try? await Task.sleep(nanoseconds: 500_000_000) }
+            let words = arg.split(separator: " ").map(String.init)
+            let setup = WindowsSetup.shared
+            setup.loadCatalog()
+            for _ in 0..<120 where setup.images.isEmpty { try? await Task.sleep(nanoseconds: 500_000_000) }
+            guard !setup.images.isEmpty else { HengeLog.log("autopilot", "no catalog: \(setup.phase)"); return }
+            if let language = words.first { setup.language = language }
+            setup.begin(user: "User", edition: words.count > 1 ? words[1] : "Professional")
+            var said = "", busy = false
+            while true {
+                busy = busy || setup.busy
+                let now = "\(setup.phase)"
+                if now.prefix(24) != said.prefix(24) { HengeLog.log("autopilot", "windows: \(now.prefix(90))"); said = now }
+                if case let .ready(id) = setup.phase, let pc = Machines.shared.all.first(where: { $0.id == id }) {
+                    setup.reset()
+                    start(pc)
+                    break
+                }
+                if case .failed = setup.phase { break }
+                if case .choosing = setup.phase, busy { break } // stopped; before it has begun it says "choosing" too
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        case "winpack": // a Windows PC's disk, packed without its empty space, and its firmware variables into Documents/win-export
+            guard let pc = Machines.shared.all.first(where: { $0.isWindows }) else { HengeLog.log("autopilot", "winpack: no Windows PC"); return }
+            let out = docs.appendingPathComponent("win-export", isDirectory: true)
+            try? FileManager.default.removeItem(at: out)
+            try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+            try? FileManager.default.copyItem(at: pc.winVars, to: out.appendingPathComponent("vars.fd"))
+            let from = pc.winDisk.path, to = out.appendingPathComponent("windows.hvsparse").path
+            HengeLog.log("autopilot", "winpack: packing \(pc.name)'s disk")
+            let rc = await Task.detached(priority: .userInitiated) { hv_sparse_pack(from, to) }.value
+            let size = ((try? FileManager.default.attributesOfItem(atPath: to)[.size]) as? NSNumber)?.int64Value ?? 0
+            HengeLog.log("autopilot", "winpack: \(rc == 0 ? "done" : "failed (\(rc))"), \(size >> 20) MB")
+        case "winsnap": // a Windows PC's screen into Documents/NAME.png
+            let file = docs.appendingPathComponent((arg.isEmpty ? "winsnap" : arg) + ".png")
+            HengeLog.log("autopilot", "winsnap \(henge_vm_save_png(file.path) == 0 ? "saved" : "failed")")
+        #endif
         case "wait":
             try? await Task.sleep(nanoseconds: UInt64((Double(arg) ?? 0) * 1e9))
         case "type":

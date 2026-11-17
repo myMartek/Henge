@@ -717,8 +717,27 @@ static void print_stats(HvCpu *cpu, int force) {
                 RATE(kick_src[0]), RATE(kick_src[1]), RATE(kick_src[3]), RATE(kick_src[2]), RATE(kick_src[4]));
         fprintf(stderr, "  light refills %.0fK/s, light branch-cache fills %.0fK/s, chained to other pages %.0f/s\n", RATE(refills) / 1e3,
                 RATE(ijc_light) / 1e3, RATE(xchained));
+        fprintf(stderr, "  light refills K/s by mapping: el0 page %.0f block %.0f big block %.0f, el1 page %.0f block %.0f big block %.0f\n",
+                RATE(refill_map[0][0]) / 1e3, RATE(refill_map[0][1]) / 1e3, RATE(refill_map[0][2]) / 1e3,
+                RATE(refill_map[1][0]) / 1e3, RATE(refill_map[1][1]) / 1e3, RATE(refill_map[1][2]) / 1e3);
+        fprintf(stderr, "  el0 light refills K/s by VA: shared region (6-14 GB) %.0f, other below 64 GB %.0f, 64-512 GB %.0f, above %.0f\n",
+                RATE(refill_el0_va[0]) / 1e3, RATE(refill_el0_va[1]) / 1e3, RATE(refill_el0_va[2]) / 1e3, RATE(refill_el0_va[3]) / 1e3);
         fprintf(stderr, "  process switches: %.0f/s saved, %.0f/s restored, %.0f/s dropped by a TLBI (%.0f entries each)\n", RATE(stash_saves), RATE(stash_hits), RATE(stash_stale),
                 s->stash_hits - last.stash_hits ? (double)(s->stash_entries - last.stash_entries) / (s->stash_hits - last.stash_hits) : 0.0);
+        if (s->shared_keeps != last.shared_keeps || s->shared_bad != last.shared_bad)
+            fprintf(stderr, "  shared tables kept live: %.0f switches/s (%.0f entries each), %.0f checks found one stale\n", RATE(shared_keeps),
+                    s->shared_keeps - last.shared_keeps ? (double)(s->shared_kept - last.shared_kept) / (s->shared_keeps - last.shared_keeps) : 0.0,
+                    (double)(s->shared_bad - last.shared_bad));
+        if (hv_knob[HV_K_SHAREDKEEP])
+            fprintf(stderr, "  shared keep, switches/s that kept nothing: no old table %.0f, fill list full %.0f, set-up %.0f, old table empty %.0f, new table empty %.0f, attributes %.0f, same table %.0f, no equal chunk %.0f\n",
+                    RATE(shared_why[0]), RATE(shared_why[1]), RATE(shared_why[2]), RATE(shared_why[3]), RATE(shared_why[4]), RATE(shared_why[5]), RATE(shared_why[6]), RATE(shared_why[7]));
+        if (hv_knob[HV_K_SHAREDKEEP])
+            fprintf(stderr, "  checks after a switch: %.0f/s, %.0f found something; entries out of date in this interval: live user %.0f, live kernel %.0f, put aside %.0f\n",
+                    RATE(flush_checked), (double)(s->shared_bad - last.shared_bad), (double)(s->check_kind[0] - last.check_kind[0]),
+                    (double)(s->check_kind[1] - last.check_kind[1]), (double)(s->check_kind[2] - last.check_kind[2]));
+        if (hv_knob[HV_K_SHAREDKEEP] & 4)
+            fprintf(stderr, "  switches to the empty table put off: %.0f/s, then back to the same process %.0f/s, on to another %.0f/s, ended by a return to user code %.0f/s; empty tables with an ASID %.0f/s\n",
+                    RATE(defers[0]), RATE(defers[1]), RATE(defers[2]), RATE(defers[3]), RATE(defers[4]));
         fprintf(stderr, "  tlb misses K/s: el0 empty %.0f el0 conflict %.0f el1 empty %.0f el1 conflict %.0f\n",
                 RATE(tlb_miss_kind[0]) / 1e3, RATE(tlb_miss_kind[1]) / 1e3, RATE(tlb_miss_kind[2]) / 1e3, RATE(tlb_miss_kind[3]) / 1e3);
         fprintf(stderr, "  slow mem causes K/s: mmio %.0f code-page write %.0f page end %.0f tlb miss %.0f other %.0f entry-but-tag %.0f\n",

@@ -1,0 +1,76 @@
+diff --git a/Sources/DeveloperDiskImageService.swift b/Sources/DeveloperDiskImageService.swift
+index e719025..c87aecb 100644
+--- a/Sources/DeveloperDiskImageService.swift
++++ b/Sources/DeveloperDiskImageService.swift
+@@ -98,6 +98,10 @@ enum DDIDownloadCatalog {
+     static func items(for paths: DDIPaths) -> [DDIDownloadItem] {
+ #if os(tvOS)
+         let platform = "tvOS"
++#elseif os(visionOS)
++        // No visionOS images in this catalog yet: the download fails and says so. A Vision Pro that Xcode has
++        // connected to since its last restart has its image mounted already, and none is fetched.
++        let platform = "xrOS"
+ #else
+         let platform = "iOS"
+ #endif
+diff --git a/project.yml b/project.yml
+index 6833be9..9c61e35 100644
+--- a/project.yml
++++ b/project.yml
+@@ -4,6 +4,7 @@ options:
+   deploymentTarget:
+     iOS: "17.4"
+     tvOS: "17.4"
++    visionOS: "2.0"
+   createIntermediateGroups: true
+ 
+ settings:
+@@ -81,7 +82,48 @@ targets:
+           STRIP_INSTALLED_PRODUCT: YES
+           STRIP_STYLE: non-global
+ 
++  # visionOS (Henge's visionOS spike). No libidevice_ffi.a is shipped for it: the iOS one, with its objects'
++  # platform rewritten (Henge's xros/scripts/retag_static_lib.sh), is looked for in Henge's xros/deps.
++  StikJIT-visionOS:
++    type: framework
++    platform: visionOS
++    sources:
++      - path: Sources
++      - path: Scripts
++        buildPhase: resources
++    dependencies:
++      - sdk: JavaScriptCore.framework
++      - sdk: Network.framework
++      - sdk: Security.framework
++      - sdk: CFNetwork.framework
++      - sdk: SystemConfiguration.framework
++      - sdk: IOKit.framework
++    settings:
++      base:
++        PRODUCT_BUNDLE_IDENTIFIER: com.stik.StikJIT
++        PRODUCT_NAME: StikJIT
++        CURRENT_PROJECT_VERSION: "$(inherited)"
++        DEFINES_MODULE: YES
++        BUILD_LIBRARY_FOR_DISTRIBUTION: YES
++        SKIP_INSTALL: NO
++        SWIFT_INCLUDE_PATHS: "$(SRCROOT)/idevice $(SRCROOT)/iokit"
++        HEADER_SEARCH_PATHS: "$(SRCROOT)/idevice $(SRCROOT)/iokit"
++        LIBRARY_SEARCH_PATHS: "$(HENGE_XROS_DEPS)/$(PLATFORM_NAME)/lib"
++        HENGE_XROS_DEPS: "$(SRCROOT)/../Henge/xros/deps"
++        OTHER_LDFLAGS: "$(inherited) -Wl,-hidden-lidevice_ffi"
++        DEAD_CODE_STRIPPING: YES
++      configs:
++        Release:
++          STRIP_INSTALLED_PRODUCT: YES
++          STRIP_STYLE: non-global
++
+ schemes:
++  StikJIT-visionOS:
++    build:
++      targets:
++        StikJIT-visionOS: all
++    archive:
++      config: Release
+   StikJIT:
+     build:
+       targets:

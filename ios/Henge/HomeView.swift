@@ -12,6 +12,7 @@ struct HomeView: View {
     @State private var jitReady = JITBootstrap.ready
     @State private var chosen: UUID?
     @State private var showMacApps = false
+    @State private var showWindows = false
     @AppStorage(MacAppsFeature.key) private var macApps = false
 
     /// The Mac on show: the one picked, or the one used last.
@@ -48,6 +49,9 @@ struct HomeView: View {
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
                         Button("Install macOS…") { tab = .install }
+                        #if os(visionOS)
+                        Button("Install Windows…") { showWindows = true }
+                        #endif
                         Button("Bring in a Mac from a computer…") { picking = true }
                         if macApps { Button("Mac Apps…") { showMacApps = true } }
                     } label: {
@@ -59,7 +63,10 @@ struct HomeView: View {
             .fileImporter(isPresented: $picking, allowedContentTypes: [.folder]) { result in
                 if case let .success(url) = result { machines.importFolder(url) }
             }
-            .sheet(isPresented: $showMacApps) { MacAppsView() }
+            .sheet(isPresented: $showMacApps) { MacAppsView().deskPlainButtons() }
+            #if os(visionOS)
+            .sheet(isPresented: $showWindows) { WindowsInstallView { pc in chosen = pc.id; running = pc }.deskPlainButtons() }
+            #endif
             .task {
                 while !Task.isCancelled { // the region may be claimed after a hand-off to StikDebug
                     jitReady = JITBootstrap.ready
@@ -99,6 +106,10 @@ struct HomeView: View {
             Text("Install macOS on this \(Device.name), or bring in a Mac made on a computer.")
                 .font(.system(size: 15)).foregroundStyle(Desk.dim).multilineTextAlignment(.center)
             Button("Install macOS") { tab = .install }.buttonStyle(DeskButtonStyle())
+            #if os(visionOS)
+            Button("Install Windows") { showWindows = true }
+                .font(.system(size: 15, weight: .semibold)).foregroundStyle(Desk.accentLight)
+            #endif
             Button("Bring in a Mac") { picking = true }
                 .font(.system(size: 15, weight: .semibold)).foregroundStyle(Desk.accentLight)
         }

@@ -17,6 +17,18 @@
 #include <string.h>
 #include <sys/utsname.h>
 
+/* Where the guest's pointer is in a picture of `w` by `h` pixels. The guest says where it is on the display's
+   one mode, the size it was started with. In another resolution (macOS offers scaled ones) the picture has
+   another size, and the place has to be scaled to it. Seen on a Vision Pro at 1600x900 after a start with
+   1920x1080: taken as it was, the pointer was drawn 1.2 times as far right and down as where a click went. */
+void hv_pvg_lite_mode_size(uint32_t *width, uint32_t *height); /* pvg_lite.h, which comes further down */
+static void cursor_place(uint32_t where, uint32_t w, uint32_t h, float *x, float *y) {
+    uint32_t mode_w = 0, mode_h = 0;
+    hv_pvg_lite_mode_size(&mode_w, &mode_h);
+    *x = (float)(where & 0xffff), *y = (float)(where >> 16);
+    if (mode_w && mode_h && w && h && (mode_w != w || mode_h != h)) *x = *x * (float)w / (float)mode_w, *y = *y * (float)h / (float)mode_h;
+}
+
 /* 1080p shrunk onto a phone would make a normal pointer a few dots across; an iPad's screen needs less. */
 static int cursor_scale(void) {
 #if TARGET_OS_IPHONE
@@ -2291,7 +2303,9 @@ static const uint8_t *half_to_byte(void) {
     if (where == 0xffffffff) return;
     /* Bigger than the guest draws it. The hot spot stays where it points. */
     const int scale = cursor_scale();
-    int x = (int)(where & 0xffff) - cursor_hot_x * scale, y = (int)(where >> 16) - cursor_hot_y * scale;
+    float at_x, at_y;
+    cursor_place(where, w, h, &at_x, &at_y);
+    int x = (int)(at_x + 0.5f) - cursor_hot_x * scale, y = (int)(at_y + 0.5f) - cursor_hot_y * scale;
     int cw = (int)cursor_w * scale, ch = (int)cursor_h * scale;
     int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
     int x1 = x + cw > (int)w ? (int)w : x + cw, y1 = y + ch > (int)h ? (int)h : y + ch;
@@ -2536,7 +2550,9 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
         uint32_t where = page ? __atomic_load_n((const uint32_t *)(page + 0xe00), __ATOMIC_ACQUIRE) : 0xffffffff;
         if (ctex && where != 0xffffffff && (shown || page[0xe04])) {
             const float scale = cursor_scale();
-            float x = (float)(where & 0xffff) - hx * scale, y = (float)(where >> 16) - hy * scale;
+            float x, y;
+            cursor_place(where, W, H, &x, &y);
+            x -= hx * scale, y -= hy * scale;
             float cw = cw0 * scale, ch = ch0 * scale;
             float r[4] = {x / W * 2 - 1, 1 - (y + ch) / H * 2, cw / W * 2, ch / H * 2};
             [e setRenderPipelineState:cursor_pipe];
@@ -2923,6 +2939,19 @@ int hv_pvg_metal_frame(HvPvgMetal *m, const uint8_t **pixels, uint32_t *w, uint3
     HvReplay *r = (__bridge HvReplay *)m;
     if (!r->frame) return -1;
     *pixels = r->frame, *w = r->frame_w, *h = r->frame_h;
+    return 0;
+}
+
+/* The size of what the guest shows now, in its pixels: it changes when the guest picks another display mode. 0, or -1
+   before anything has been shown. */
+int hv_pvg_metal_screen_size(HvPvgMetal *m, uint32_t *w, uint32_t *h) {
+    if (!m) return -1;
+    HvReplay *r = (__bridge HvReplay *)m;
+    os_unfair_lock_lock(&r->screen_lock);
+    uint32_t W = r->screen_w, H = r->screen_h;
+    os_unfair_lock_unlock(&r->screen_lock);
+    if (!W || !H) return -1;
+    *w = W, *h = H;
     return 0;
 }
 

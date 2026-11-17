@@ -15,6 +15,14 @@ if [ "$1" = mac ]; then
     SDKNAME=macosx
     CC=(xcrun --sdk macosx clang -arch arm64 -mmacosx-version-min=14.0)
     CMAKE_TARGET=(-DCMAKE_OSX_DEPLOYMENT_TARGET=14.0)
+elif [ "$1" = xros ] || [ "$1" = xrsimulator ]; then
+    # visionOS (Apple Vision Pro, or its simulator): the same sources into build/<platform>.
+    BUILD="$ROOT/build/$1"
+    SDKNAME=$1
+    XR_TRIPLE="arm64-apple-xros${XR_MINVER:-2.0}"
+    [ "$1" = xrsimulator ] && XR_TRIPLE="$XR_TRIPLE-simulator"
+    CC=(xcrun --sdk $1 clang -target "$XR_TRIPLE")
+    CMAKE_TARGET=(-DCMAKE_SYSTEM_NAME=visionOS -DCMAKE_OSX_SYSROOT=$1 -DCMAKE_OSX_DEPLOYMENT_TARGET=${XR_MINVER:-2.0})
 else
     BUILD="$ROOT/build/ios"
     SDKNAME=iphoneos

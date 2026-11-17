@@ -1,0 +1,27 @@
+[package]
+name = "henge-pair"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-or-later"
+publish = false
+
+# visionOS spike: pairs a host identity with an Apple Vision Pro and gives the remote pairing file Henge's built-in
+# JIT helper needs. A library for the visionOS app (libhenge_rpclient.a, built for iOS and retagged like Husk's) and
+# the same thing as a command for a Mac. Same idevice version as Husk's pairing library.
+[lib]
+name = "henge_rpclient"
+crate-type = ["staticlib", "rlib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "henge-pair"
+path = "src/main.rs"
+
+[dependencies]
+idevice = { version = "=0.1.68", default-features = false, features = ["remote_pairing", "ring"] }
+tokio = { version = "1", features = ["rt", "net", "time", "macros"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
