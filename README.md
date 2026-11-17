@@ -1,3 +1,8 @@
+> **Branch `visionos`:** a working state of a port to Apple Vision Pro that runs macOS and Windows 11 on ARM in one app.
+> It is not part of Henge itself. Notes are in [`xros/README.md`](xros/README.md), build steps for both guests in
+> [`xros/BUILD.md`](xros/BUILD.md) (both German). Windows needs the fork
+> [myMartek/WindowsiOS](https://github.com/myMartek/WindowsiOS/tree/visionos) checked out beside this one.
+
 <p align="center">
   <img src="docs/icon.png" width="120" height="120" alt="Henge">
 </p>

@@ -18,6 +18,7 @@ emuliert, für Apple Vision Pro bauen lässt.
 | **JIT auf der Vision Pro über lldb** | **bestanden**, 512 MB Region, Code lief in 64 von 64 Stichproben-Seiten |
 | **JIT auf der Vision Pro ohne Mac** | **bestanden**, eingebauter Helfer, 1536 MB Region, 10 s nach App-Start |
 | **macOS installieren und booten** | **läuft**: Sequoia 15.6.1 installiert und gestartet in Henge JIT, 4 Kerne, vom Nutzer am Gerät gesehen |
+| **Windows 11 für ARM installieren und starten** | **läuft**: Download von Microsoft, Installation und Start auf der Vision Pro, siehe „Windows“ |
 
 ## JIT auf der Vision Pro: was gemessen wurde
 
@@ -260,21 +261,39 @@ Die neun Testreihen aus `TESTS` laufen damit auf dem Mac durch, `test_mmu` mit 1
 Ganzes baut hier nicht, weil `libslirp` für den Mac fehlt. Die Maschinenstruktur hat sich geändert: nach dem
 Anwenden alle Engine-Objekte neu bauen (das Makefile kennt keine Header-Abhängigkeiten).
 
+## Windows
+
+Dieselbe App installiert und startet auch Windows 11 für ARM. Der Weg in der App: Plus-Knopf, „Install Windows…“.
+
+| Schritt | Stand |
+| --- | --- |
+| Sprache und Edition wählen, ESD von Microsofts Servern laden, Prüfsumme prüfen | läuft auf dem Gerät |
+| Installationsmedium auf dem Gerät bauen, ohne Mac | läuft auf dem Gerät |
+| Installation bis zum Desktop, mit Netzwerk | läuft auf dem Gerät, rund 20 Minuten |
+| Auflösung 1280 × 720, 1600 × 900 oder 1920 × 1080 | auf dem Mac geprüft |
+| Ein älteres Windows beim Start nachrüsten (Treiber, Einstellungen) | läuft auf dem Gerät |
+| Windows stoppen und eine andere Maschine starten, ohne die App zu beenden | auf dem Mac geprüft, auf dem Gerät offen |
+
+Die Engine für den Windows-PC ist nicht Henges eigene. Sie stammt aus
+[ammaarreshi/WindowsiOS](https://github.com/ammaarreshi/WindowsiOS), einem Schwesterprojekt mit 4-KB-Seiten, UEFI,
+ACPI und NVMe, und liegt mit den Änderungen für visionOS im Fork
+[myMartek/WindowsiOS, Branch `visionos`](https://github.com/myMartek/WindowsiOS/tree/visionos). Der Checkout muss als
+`WindowsiOS` neben diesem liegen, der App-Build baut ihn mit. Ablauf der Installation, Messwerte und Grenzen stehen
+dort in `xros/README.md`.
+
+In diesem Checkout liegt die App-Seite:
+
+- `ios/Henge/Vision/Windows.swift`: Katalog, Download, Einrichtung, Nachrüsten, Auflösung.
+- `ios/Henge/Native/henge-vm.c`: unter `HENGE_WINDOWS` gehen Eingaben, Bild und Zustand an die Windows-Engine, solange
+  ein PC läuft.
+- `ios/Henge/Resources/Windows/`: UEFI-Firmware (EDK2, wie mit QEMU 9.2.0 ausgeliefert, Bildmodi gepatcht) und der
+  VirtIO-Netzwerktreiber von Red Hat, jeweils mit Lizenztext.
+
+Windows selbst liegt nicht bei. Die App lädt es bei der Einrichtung von Microsoft.
+
 ## Bauen
 
-```bash
-xros/scripts/build_deps_xros.sh xrsimulator   # einmalig, braucht meson und ninja im PATH
-xros/scripts/build_deps_xros.sh xros          # einmalig, für das Gerät
-cd ios && xcodegen generate
-xcodebuild -project Henge.xcodeproj -scheme HengeVision -sdk xrsimulator \
-  -destination 'generic/platform=visionOS Simulator' -derivedDataPath build/dd CODE_SIGNING_ALLOWED=NO build
-```
-
-Meson liegt in `../.buildenv` neben dem Checkout: `export PATH="$PWD/../.buildenv/bin:$PATH"`.
-Für das Gerät das Schema `HengeVision` in Xcode öffnen, ein Team wählen und mit angehängtem Debugger starten.
-Das Ziel signiert mit `Henge.personal.entitlements`, das auch ein kostenloses Team signieren kann.
-
-`xros/scripts/typecheck_xros.sh` prüft nur die Swift-Quellen gegen das visionOS-SDK und ist in Sekunden durch.
+Die vollständige Anleitung für beide Gäste, an frischen Klonen nachgebaut, steht in [`BUILD.md`](BUILD.md).
 
 ## Was geändert wurde
 
